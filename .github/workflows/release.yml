@@ -1,7 +1,8 @@
 # Existing tag `vX.Y.Z` → one executable per platform on the GitHub release, plus SHA256SUMS.
 #
 # Run manually only (Actions → Release → Run workflow), so pushing a tag never publishes on
-# its own. Push the tag first, then dispatch this with that tag name.
+# its own. Push the tag first, then pick it in "Use workflow from" and run — that dropdown IS
+# the tag picker, and the `tag` box below only exists to override it.
 #
 # Asset names are the contract with hosts that install obrew for the user: MotionBuff's
 # managed installer fetches `obrew-<target>[.exe]` from the latest release and verifies the
@@ -12,8 +13,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (must already exist, e.g. v1.2.3)'
-        required: true
+        description: 'Override: release this tag instead of the one selected above'
+        required: false
         type: string
 
 permissions:
@@ -23,9 +24,31 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # `workflow_dispatch` inputs can only be a string, a boolean, or a `choice` with a
+      # hardcoded list — none of which can enumerate tags — so there is no way to offer a tag
+      # dropdown of our own. The "Use workflow from" ref picker already is one: dispatching
+      # from a tag sets ref_type=tag and ref_name=<the tag>, so read it from there and leave
+      # the input as an override for the rare case of running one tag's workflow on another.
+      - name: Resolve the tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            if [ "$REF_TYPE" != tag ]; then
+              echo "::error::'Use workflow from' selected the $REF_TYPE '$REF_NAME', not a tag. Pick a tag there, or type one in the override box."
+              exit 1
+            fi
+            tag="$REF_NAME"
+          fi
+          echo "Releasing $tag"
+          echo "name=$tag" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ steps.tag.outputs.name }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -38,7 +61,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           # The checkout is a detached tag, not a tag ref, so name the release explicitly.
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ steps.tag.outputs.name }}
           files: |
             dist/obrew-windows-x64.exe
             dist/obrew-darwin-arm64
