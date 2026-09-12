@@ -1,0 +1,37 @@
+{
+  "name": "obrew-cli",
+  "version": "0.1.0",
+  "description": "Obrew: local AI models as a headless agent CLI.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "packageManager": "bun@1.4.0",
+  "bin": {
+    "obrew": "./src/main.ts"
+  },
+  "llamacpp_tag": "b9080",
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test ./src ./test",
+    "test:e2e": "OBREW_E2E=1 bun test ./test/e2e",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build": "bun run build.ts",
+    "build:all": "bun run build.ts --all",
+    "smoke": "bun run scripts/smoke.ts"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/bun": "^1.3.9",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "typescript": "~5.6.3",
+    "typescript-eslint": "^8.18.2"
+  }
+}

@@ -1,0 +1,201 @@
+/**
+ * `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"`
+ *
+ * The provider entry point. A host spawns this once per turn with stdin ignored, reads
+ * JSON lines from stdout, and stops it with a kill. Everything that can go wrong is reported
+ * as a `turn.failed` event AND a non-zero exit, so a host may rely on either.
+ */
+import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { runTurn } from '../../agent/loop'
+import { generationFor, parseEffort } from '../../agent/effort'
+import type { ChatMessage } from '../../agent/messages'
+import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
+import { appendMessages, createSession, loadSession, newSessionId } from '../../agent/session'
+import { launchArgs, loadOptionsFrom } from '../../engine/flags'
+import { requireEngine } from '../../engine/install'
+import { LlamaServer } from '../../engine/llama-server'
+import { freePort } from '../../engine/ports'
+import { reapOrphans } from '../../engine/running'
+import { resolveModel } from '../../models/registry'
+import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
+import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
+import type { ExecEvent } from '../../shared/events'
+import { track, untrack } from '../../shared/proc'
+import { asInt, parse, parseConfigPairs } from '../args'
+import { createOutput } from '../output'
+
+const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
+
+  --json                     one JSON event per line on stdout
+  --model <id>               installed model id (default: the registry default)
+  --effort low|medium|high   thinking on/off and answer length (default: low)
+  -c key=value               run knob; repeatable. thinking, max_tokens, temperature, top_p,
+                             top_k, min_p, seed, stop, ctx_size, n_gpu_layers, threads,
+                             batch_size, cache_type_k, cache_type_v, mmap, mlock
+  --cwd <dir>                working directory for tools (default: current)
+  --system-prompt <text>     system message; --system-prompt-file <path> reads it from a file
+  --prompt-file <path>       read the prompt from a file ("-" as prompt reads stdin)
+  --tools <list|none>        built-in tools (phase 2); accepted now, ignored
+  --mcp-server name=<url>    MCP server (phase 3); accepted now, ignored
+  --max-iterations <n>       tool-loop cap (default 25)
+  --stall-ms <n>             abort after this long with no output (default 120000)
+  --wall-ms <n>              abort after this long in total (default 1800000)
+  --include-tool-io          put tool inputs/outputs on the wire`
+
+const OPTIONS = {
+  json: { type: 'boolean', default: false },
+  help: { type: 'boolean', short: 'h', default: false },
+  model: { type: 'string' },
+  effort: { type: 'string', default: 'low' },
+  config: { type: 'string', multiple: true, short: 'c' },
+  cwd: { type: 'string' },
+  'system-prompt': { type: 'string' },
+  'system-prompt-file': { type: 'string' },
+  'prompt-file': { type: 'string' },
+  tools: { type: 'string' },
+  'mcp-server': { type: 'string', multiple: true },
+  'max-iterations': { type: 'string', default: '25' },
+  'stall-ms': { type: 'string', default: '120000' },
+  'wall-ms': { type: 'string', default: '1800000' },
+  'include-tool-io': { type: 'boolean', default: false },
+} as const
+
+/**
+ * A script named by `OBREW_LLAMA_SERVER` runs under this same Bun (tests use a fake server
+ * written in TypeScript). Only meaningful when running from source: in a compiled binary
+ * `process.execPath` is obrew itself.
+ */
+export const engineCommand = (binary: string): string[] =>
+  /\.[cm]?[jt]s$/.test(binary) ? [process.execPath, binary] : [binary]
+
+async function readPrompt(positionals: string[], promptFile: string | undefined): Promise<string> {
+  if (promptFile) return (await readFile(promptFile, 'utf8')).trim()
+  const inline = positionals.join(' ').trim()
+  if (inline === '-') return (await Bun.stdin.text()).trim()
+  if (!inline) throw new UsageError('a prompt is required (or --prompt-file)')
+  return inline
+}
+
+export async function runExec(argv: string[]): Promise<number> {
+  const { values, positionals } = parse(argv, OPTIONS)
+  if (values.help) {
+    console.log(HELP)
+    return 0
+  }
+  const out = createOutput(values.json)
+
+  // `exec resume <id> <prompt…>` — a subcommand, not a flag, like codex.
+  let resumeId: string | null = null
+  let rest = positionals
+  if (rest[0] === 'resume') {
+    resumeId = rest[1] ?? null
+    if (!resumeId) throw new UsageError('resume needs a session id')
+    rest = rest.slice(2)
+  }
+
+  const prompt = await readPrompt(rest, values['prompt-file'])
+  const effort = parseEffort(values.effort)
+  const pairs = parseConfigPairs(values.config)
+  const gen = generationFor(effort, pairs)
+  const cwd = resolve(values.cwd ?? process.cwd())
+  const stallMs = asInt(values['stall-ms'], '--stall-ms')
+  const wallMs = asInt(values['wall-ms'], '--wall-ms')
+  const systemPrompt = values['system-prompt-file']
+    ? await readFile(values['system-prompt-file'], 'utf8')
+    : (values['system-prompt'] ?? DEFAULT_SYSTEM_PROMPT)
+
+  const startedAt = Date.now()
+  const controller = new AbortController()
+  track(controller)
+  let failCode: FailCode | null = null
+  const stop = (code: FailCode) => {
+    failCode ??= code
+    controller.abort()
+  }
+  const onSignal = () => stop('aborted')
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+
+  let stallTimer: ReturnType<typeof setTimeout> | null = null
+  const armStall = () => {
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => stop('timeout'), stallMs)
+  }
+  const wallTimer = setTimeout(() => stop('timeout'), wallMs)
+
+  let server: LlamaServer | null = null
+  const emit = (event: ExecEvent) => out.event(event)
+
+  try {
+    await reapOrphans(out.log)
+    const config = await loadConfig()
+    const model = await resolveModel(values.model)
+    const engine = await requireEngine(config)
+
+    const session = resumeId ? await loadSession(resumeId) : null
+    const sessionId = session?.header.id ?? newSessionId()
+    if (!session) await createSession({ id: sessionId, createdAt: new Date().toISOString(), model: model.id, cwd })
+
+    const port = await freePort()
+    const loadOpts = loadOptionsFrom(pairs, {
+      ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
+      ...(model.mmprojPath ? { mmprojPath: model.mmprojPath } : {}),
+    })
+    armStall()
+    server = await LlamaServer.start({
+      command: engineCommand(engine.binary),
+      args: launchArgs(model.path, port, loadOpts),
+      port,
+      model: model.id,
+      signal: controller.signal,
+      onStatus: (state) => {
+        armStall()
+        emit({ type: 'engine.status', state })
+      },
+    })
+    emit({ type: 'session', sessionId, model: model.id, engine: { tag: engine.tag, variant: engine.variant, port } })
+
+    const history = (session?.messages ?? []).filter((m) => m.role !== 'system')
+    const userMessage: ChatMessage = { role: 'user', content: prompt }
+    const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt }, ...history, userMessage]
+    const toStore: ChatMessage[] = session ? [userMessage] : [messages[0]!, userMessage]
+
+    const client = server.client
+    const turn = await runTurn({ client, messages, gen, signal: controller.signal, emit, onActivity: armStall })
+    toStore.push(turn.message)
+    await appendMessages(sessionId, toStore)
+
+    emit({
+      type: 'turn.completed',
+      sessionId,
+      durationMs: Date.now() - startedAt,
+      iterations: 1,
+      usage: turn.usage,
+      stopReason: turn.finishReason === 'length' ? 'length' : 'stop',
+    })
+    return 0
+  } catch (err) {
+    const code: FailCode = failCode ?? (err instanceof ObrewError ? err.code : isAbortError(err) ? 'aborted' : 'engine_failed')
+    const message =
+      failCode === 'timeout'
+        ? 'no output within the time limit'
+        : failCode === 'aborted'
+          ? 'stopped'
+          : err instanceof Error
+            ? err.message
+            : String(err)
+    if (server && (code === 'aborted' || code === 'timeout')) await server.client.eraseSlot()
+    emit({ type: 'turn.failed', code, message })
+    if (code === 'engine_missing' || code === 'model_missing') out.log(NOT_READY_HINT)
+    if (err instanceof UsageError) throw err
+    return 1
+  } finally {
+    clearTimeout(wallTimer)
+    if (stallTimer) clearTimeout(stallTimer)
+    process.off('SIGINT', onSignal)
+    process.off('SIGTERM', onSignal)
+    if (server) await server.stop()
+    untrack(controller)
+  }
+}

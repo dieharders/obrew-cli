@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# Compiled binaries (build.ts writes these to the repo root for the host target)
+obrew
+obrew.exe
+*.js.map
+
+# Local data when OBREW_HOME points inside the repo during development
+.obrew-home/
