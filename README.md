@@ -33,7 +33,21 @@ obrew sessions list|show <id>|rm <id>
 ```
 
 Every run-time knob is also a `-c key=value` pair (`thinking`, `max_tokens`, `temperature`,
-`ctx_size`, `n_gpu_layers`, ...), so `exec` and `exec resume` accept the identical flag set.
+`ctx_size`, `n_gpu_layers`, `tool_mode`, ...), so `exec` and `exec resume` accept the identical
+flag set.
+
+## Tools are constrained, always
+
+The model never emits free-form tool JSON. With a chat template that knows about tools
+(Qwen 2.5/3, Llama 3.x, Hermes, Mistral, DeepSeek), `obrew` sends the tool schemas and
+llama.cpp decodes the call under a grammar built from them. With any other template, or
+`-c tool_mode=universal`, choosing a tool and filling its arguments are two separate requests,
+each decoded under a JSON schema. Either way the arguments are validated against the tool's
+schema before it runs, and an invalid call is repaired once under that schema. A failing tool
+is reported back to the model as a result; it never ends the run.
+
+`--output-schema '{...}'` (or `@file.json`) decodes the final answer under a schema and puts the
+parsed value on `turn.completed.output`; `--grammar @file.gbnf` does the same with GBNF.
 
 ## Where things live
 

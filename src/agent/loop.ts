@@ -116,6 +116,12 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
     onActivity: opts.onActivity,
   }
 
+  // A small model can re-issue the identical call forever, each time getting the identical
+  // result. That is not progress; after one repeat the loop tells it so and takes the tools
+  // away for one turn, which yields an answer instead of burning the iteration cap.
+  let lastSignature: string | null = null
+  let forcePlainTurn = false
+
   for (;;) {
     if (iterations >= opts.maxIterations) {
       stopReason = 'max_iterations'
@@ -125,7 +131,13 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
 
     let assistant: TurnResult['message']
     let finish: string | null
-    if (useTools && opts.toolMode === 'universal') {
+    if (forcePlainTurn) {
+      forcePlainTurn = false
+      const turn = await runTurn({ ...turnBase, messages })
+      addUsage(turn.usage)
+      assistant = turn.message
+      finish = turn.finishReason
+    } else if (useTools && opts.toolMode === 'universal') {
       const call = await universalSelect({ ...turnBase, messages, registry: opts.registry })
       if (call) {
         assistant = { role: 'assistant', content: null, tool_calls: [call] }
@@ -155,14 +167,38 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
       break
     }
 
+    const signature = JSON.stringify(calls.map((c) => [c.function.name, c.function.arguments]))
+    const repeated = signature === lastSignature
+    lastSignature = signature
+
     for (const call of calls) {
       const result = await executeCall(call, messages, opts, toolCtx)
       push({ role: 'tool', tool_call_id: call.id, content: result })
+    }
+
+    if (repeated) {
+      push({
+        role: 'user',
+        content:
+          'You repeated the same tool call with the same arguments; its result is unchanged and is shown above. ' +
+          'Do not call tools again. Answer the request now from what you have.',
+      })
+      forcePlainTurn = true
     }
   }
 
   let output: unknown
   if (opts.outputSchema || opts.grammar) {
+    // A user turn closes the transcript before the constrained request. The model's own text
+    // may be the last message here, and a chat template asked to continue after an assistant
+    // turn is exactly the case llama.cpp's grammar + reasoning handling trips over
+    // ("empty grammar stack after accepting piece: <think>").
+    push({
+      role: 'user',
+      content: opts.outputSchema
+        ? 'Now give the final answer as JSON that matches the required schema, and nothing else.'
+        : 'Now give the final answer in the required format, and nothing else.',
+    })
     const turn = await runTurn({
       ...turnBase,
       messages,

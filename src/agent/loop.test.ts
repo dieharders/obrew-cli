@@ -201,3 +201,64 @@ describe('runAgent', () => {
     expect((result.produced[1] as { content: string }).content).toMatch(/timed out/)
   })
 })
+
+describe('runAgent repeat guard', () => {
+  let home: Awaited<ReturnType<typeof tempHome>>
+  let cwd: string
+  let server: LlamaServer | null = null
+  let requestLog: string
+
+  beforeEach(async () => {
+    home = await tempHome()
+    cwd = await mkdtemp(join(tmpdir(), 'obrew-loop2-'))
+    await writeFile(join(cwd, 'a.txt'), 'x')
+    requestLog = join(cwd, 'requests.jsonl')
+  })
+  afterEach(async () => {
+    await server?.stop()
+    server = null
+    await rm(cwd, { recursive: true, force: true })
+    await home.cleanup()
+  })
+
+  test('the same call twice in a row ends tool use and forces a plain answer', async () => {
+    const port = await freePort()
+    server = await LlamaServer.start({
+      command: [process.execPath, FAKE_SERVER],
+      args: ['-m', 'fake', '--port', String(port)],
+      port,
+      model: 'fake',
+      env: {
+        FAKE_SCRIPT: JSON.stringify([
+          { toolCalls: [{ name: 'Glob', arguments: { pattern: '*' } }] },
+          { toolCalls: [{ name: 'Glob', arguments: { pattern: '*' } }] },
+          { text: 'answer' },
+        ]),
+        FAKE_LOG_REQUESTS: requestLog,
+      },
+      logPath: null,
+    })
+    const events: ExecEvent[] = []
+    const result = await runAgent({
+      client: server.client,
+      messages: [{ role: 'user', content: 'list' }],
+      gen: generationFor('low'),
+      registry: builtinRegistry('Glob'),
+      toolMode: 'native',
+      toolContext: { cwd, signal: new AbortController().signal },
+      maxIterations: 10,
+      signal: new AbortController().signal,
+      emit: (e) => events.push(e),
+    })
+    expect(result.iterations).toBe(3)
+    expect(result.finalText).toBe('answer')
+    expect(result.stopReason).toBe('stop')
+    const reqs = (await readFile(requestLog, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>)
+    expect(reqs[1]!.tools).toBeDefined()
+    expect(reqs[2]!.tools).toBeUndefined()
+    const last = (reqs[2]!.messages as Array<{ role: string; content: string }>).at(-1)!
+    expect(last.role).toBe('user')
+    expect(last.content).toMatch(/repeated the same tool call/)
+    expect(result.produced.filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+})

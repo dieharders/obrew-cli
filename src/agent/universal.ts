@@ -29,7 +29,8 @@ export interface UniversalOptions {
 
 const CHOOSE_INSTRUCTIONS =
   'You may call ONE of the tools below to make progress on the latest request, or choose "none" ' +
-  'to answer directly. Reply with JSON only.'
+  'to answer directly. If tool results above already contain what the request needs, choose ' +
+  '"none". Never repeat a call whose result is already shown. Reply with JSON only.'
 
 async function constrainedJson(
   opts: UniversalOptions,
