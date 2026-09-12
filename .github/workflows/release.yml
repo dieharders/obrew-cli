@@ -1,0 +1,38 @@
+# Tag `vX.Y.Z` → one executable per platform on the GitHub release, plus SHA256SUMS.
+#
+# Asset names are the contract with hosts that install obrew for the user: MotionBuff's
+# managed installer fetches `obrew-<target>[.exe]` from the latest release and verifies the
+# `digest` GitHub records for every asset. Rename an asset here and that installer breaks.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck && bun run lint && bun test ./src ./test
+      # `bun build --compile --target` cross-compiles: one Linux runner produces all five.
+      - run: bun run build:all
+      - name: Smoke the Linux build
+        run: ./dist/obrew-linux-x64 --version
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/obrew-windows-x64.exe
+            dist/obrew-darwin-arm64
+            dist/obrew-darwin-x64
+            dist/obrew-linux-x64
+            dist/obrew-linux-arm64
+            dist/SHA256SUMS
+          generate_release_notes: true

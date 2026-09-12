@@ -15,6 +15,7 @@ import { parseMcpServerSpec } from '../../mcp/spec'
 import { McpError } from '../../mcp/types'
 import { generationFor, parseEffort } from '../../agent/effort'
 import type { ChatMessage } from '../../agent/messages'
+import { imagePart, transcriptContent, userContent } from '../../agent/images'
 import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
 import { appendMessages, createSession, loadSession, newSessionId } from '../../agent/session'
 import { launchArgs, loadOptionsFrom } from '../../engine/flags'
@@ -40,7 +41,9 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --cwd <dir>                working directory for tools (default: current)
   --system-prompt <text>     system message; --system-prompt-file <path> reads it from a file
   --prompt-file <path>       read the prompt from a file ("-" as prompt reads stdin)
-  --tools <list|none>        built-in tools: Read,Grep,Glob (default) or none
+  --tools <list|none>        built-in tools: Read,Grep,Glob (default), WebSearch, or none
+  --image <path>             attach an image (png/jpg/gif/webp); needs a model pulled with
+                             --mmproj. Repeatable.
   --mcp-server name=<url>    MCP server over streamable HTTP; or name=stdio:<command …>.
                              Its tools appear as mcp__<name>__<tool>. Repeatable.
   --max-iterations <n>       tool-loop cap (default 25)
@@ -76,6 +79,7 @@ const OPTIONS = {
   'wall-ms': { type: 'string', default: '1800000' },
   'include-tool-io': { type: 'boolean', default: false },
   engine: { type: 'string' },
+  image: { type: 'string', multiple: true },
 } as const
 
 const ENGINE_MODES = ['shared', 'ephemeral'] as const
@@ -164,6 +168,11 @@ export async function runExec(argv: string[]): Promise<number> {
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
+    const imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
+    if (imagePaths.length > 0 && !model.mmprojPath) {
+      throw new ObrewError('bad_request', `${model.id} has no vision projector; pull it with --mmproj to use --image`)
+    }
+    const images = await Promise.all(imagePaths.map(imagePart))
 
     // The host's tools, dialled per invocation. Connected before the engine starts so a dead
     // URL fails fast, and so the model load and the handshake overlap nothing that matters.
@@ -202,9 +211,11 @@ export async function runExec(argv: string[]): Promise<number> {
     emit({ type: 'session', sessionId, model: model.id, engine: { tag: engine.tag, variant: engine.variant, port: handle.port } })
 
     const history = (session?.messages ?? []).filter((m) => m.role !== 'system')
-    const userMessage: ChatMessage = { role: 'user', content: prompt }
+    const userMessage: ChatMessage = { role: 'user', content: userContent(prompt, images) }
     const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt }, ...history, userMessage]
-    const toStore: ChatMessage[] = session ? [userMessage] : [messages[0]!, userMessage]
+    // The transcript keeps a marker per image, not the base64.
+    const storedUser: ChatMessage = { role: 'user', content: transcriptContent(prompt, imagePaths) }
+    const toStore: ChatMessage[] = session ? [storedUser] : [messages[0]!, storedUser]
 
     const client = handle.client
     const touch = handle.touch

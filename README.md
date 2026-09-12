@@ -56,6 +56,19 @@ only; `--mcp-server name=stdio:<command …>` launches one as a child process. I
 to the model as `mcp__<name>__<tool>`, get the same schema validation as built-ins, and a
 result the server marks `isError` is fed back to the model rather than ending the run.
 
+## The warm engine
+
+`exec` keeps one `llama-server` alive between runs (`--engine shared`, the default): the first
+run loads the model, later runs with the same model and flags reuse it, a different model
+replaces it, and an engine idle for ten minutes is stopped by the next run. `--engine ephemeral`
+(or `OBREW_ENGINE=ephemeral`) loads and unloads per run. `obrew engine status|start|stop`
+inspect and control it.
+
+`obrew serve --port 8008` fronts the same engine with an OpenAI-compatible API:
+`/v1/chat/completions`, `/v1/completions`, `/v1/models`, plus `/obrew/status`, `/obrew/models`
+and `POST /obrew/models/pull` (SSE progress). The `model` field picks the model and swaps the
+engine when it differs.
+
 ## Where things live
 
 `%LOCALAPPDATA%\Obrew` on Windows, `~/Library/Application Support/Obrew` on macOS,

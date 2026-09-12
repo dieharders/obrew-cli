@@ -7,11 +7,14 @@ import { globTool } from './glob'
 import { grepTool } from './grep'
 import { readTool } from './read'
 import { TOOL_NAME, toolSchema, type Tool } from './types'
+import { webSearchTool } from './websearch'
 
+/** WebSearch exists but is not in the default trio: a host opts in by naming it. */
 export const BUILTIN_TOOLS: Record<string, Tool> = {
   Read: readTool,
   Grep: grepTool,
   Glob: globTool,
+  WebSearch: webSearchTool,
 }
 
 export class ToolRegistry {
