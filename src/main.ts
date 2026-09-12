@@ -75,6 +75,8 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-if (import.meta.main) {
-  process.exitCode = await main(process.argv.slice(2))
-}
+// Unconditional, NOT `if (import.meta.main)`. In an executable produced by the `Bun.build`
+// JS API with `compile` (Bun 1.4.0) `import.meta.main` is false — only the CLI form sets it —
+// so a guarded entry point compiled fine, ran, printed nothing and exited 0. Nothing imports
+// this module as a library; the commands live in ./cli/commands for that.
+process.exitCode = await main(process.argv.slice(2))
