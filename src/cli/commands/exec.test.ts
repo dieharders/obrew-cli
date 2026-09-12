@@ -113,3 +113,57 @@ describe('obrew exec --json', () => {
     expect(status.model.installed).toBe(true)
   }, TIMEOUT_MS)
 })
+
+describe('obrew exec --json with tools', () => {
+  let home: Awaited<ReturnType<typeof tempHome>>
+  let cwd: string
+  beforeEach(async () => {
+    home = await tempHome()
+    const modelPath = join(home.dir, 'models', 'org--repo', 'm.gguf')
+    await mkdir(join(home.dir, 'models', 'org--repo'), { recursive: true })
+    await writeFile(modelPath, 'GGUF')
+    await saveRegistry({
+      version: 1,
+      default: 'org/repo:m.gguf',
+      models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: null, sizeBytes: 4, addedAt: '' }],
+    })
+    cwd = join(home.dir, 'work')
+    await mkdir(join(cwd, 'src'), { recursive: true })
+    await writeFile(join(cwd, 'src', 'main.ts'), 'export const answer = 42\n')
+  })
+  afterEach(() => home.cleanup())
+
+  test('Glob then Read through the real CLI, with the transcript persisted', async () => {
+    const script = JSON.stringify([
+      { toolCalls: [{ name: 'Glob', arguments: { pattern: '**/*.ts' } }] },
+      { toolCalls: [{ name: 'Read', arguments: { path: 'src/main.ts' } }] },
+      { text: 'The answer is 42.' },
+    ])
+    const { events, code } = await run(['exec', '--json', '--cwd', cwd, 'what is the answer'], { FAKE_SCRIPT: script })
+    expect(code).toBe(0)
+    const tools = events.filter((e) => e.type === 'tool.start').map((e) => (e as { name: string }).name)
+    expect(tools).toEqual(['Glob', 'Read'])
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', iterations: 3, stopReason: 'stop' })
+    const session = events.find((e) => e.type === 'session') as { sessionId: string }
+    const show = Bun.spawnSync([process.execPath, MAIN, 'sessions', 'show', session.sessionId, '--json'], { env: process.env })
+    const stored = JSON.parse(show.stdout.toString()) as { messages: Array<{ role: string }> }
+    expect(stored.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'tool', 'assistant'])
+  }, TIMEOUT_MS)
+
+  test('--output-schema puts parsed JSON on turn.completed', async () => {
+    const script = JSON.stringify([{ text: 'thinking about it' }, { text: '{"n": 7}' }])
+    const { events, code } = await run(
+      ['exec', '--json', '--tools', 'none', '--output-schema', '{"type":"object","properties":{"n":{"type":"integer"}}}', 'how many'],
+      { FAKE_SCRIPT: script },
+    )
+    expect(code).toBe(0)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 7 } })
+  }, TIMEOUT_MS)
+
+  test('--max-iterations exhaustion reports max_iterations and exits 1', async () => {
+    const script = JSON.stringify([{ toolCalls: [{ name: 'Glob', arguments: { pattern: '*' } }] }])
+    const { events, code } = await run(['exec', '--json', '--cwd', cwd, '--max-iterations', '2', 'loop'], { FAKE_SCRIPT: script })
+    expect(code).toBe(1)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', stopReason: 'max_iterations', iterations: 2 })
+  }, TIMEOUT_MS)
+})

@@ -8,12 +8,16 @@
  *   FAKE_EXIT_CODE=<n>     print a fatal line to stderr and exit n before listening
  *   FAKE_REPLY=<text>      the assistant text, streamed in 3-character chunks
  *   FAKE_REASONING=<text>  reasoning_content streamed before the reply
- *   FAKE_TOOL_CALLS=<json> a JSON array of {name, arguments} emitted as tool_calls on the
- *                          FIRST chat request; later requests get FAKE_REPLY
  *   FAKE_SLOW_MS=<n>       delay between chunks (for stall tests)
  *   FAKE_ECHO_LAST=1       reply with the text of the last message instead of FAKE_REPLY
- *   FAKE_JSON_REPLY=<json> when the request carries response_format / json_schema, stream this
+ *   FAKE_TEMPLATE=<text>   what GET /props reports as chat_template
+ *   FAKE_SCRIPT=<json>     an array of scripted replies, one per chat request in order (the
+ *                          last repeats). Each: { text?, reasoning?, toolCalls?: [{name,
+ *                          arguments}], finish? }. Overrides FAKE_REPLY / FAKE_REASONING.
+ *   FAKE_LOG_REQUESTS=<p>  append every chat request body as a JSON line to this file
  */
+import { appendFileSync } from 'node:fs'
+
 const argv = process.argv.slice(2)
 const portIdx = argv.indexOf('--port')
 const port = Number(argv[portIdx + 1] ?? 0)
@@ -27,66 +31,77 @@ if (Number.isFinite(exitCode) && env.FAKE_EXIT_CODE) {
   process.exit(exitCode)
 }
 
+interface Scripted {
+  text?: string
+  reasoning?: string
+  toolCalls?: Array<{ name: string; arguments: unknown }>
+  finish?: string
+}
+
 const startedAt = Date.now()
 const loadMs = Number(env.FAKE_LOAD_MS ?? 0)
 const slowMs = Number(env.FAKE_SLOW_MS ?? 0)
+const script: Scripted[] | null = env.FAKE_SCRIPT ? (JSON.parse(env.FAKE_SCRIPT) as Scripted[]) : null
 let chatCalls = 0
 
 process.stderr.write(`fake llama-server listening on ${port} model=${model}\n`)
 
 const sse = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`
 const chunk = (delta: Record<string, unknown>, finish: string | null = null, usage?: unknown) =>
-  sse({
-    choices: [{ index: 0, delta, finish_reason: finish }],
-    ...(usage ? { usage } : {}),
-  })
+  sse({ choices: [{ index: 0, delta, finish_reason: finish }], ...(usage ? { usage } : {}) })
 
 function* pieces(text: string, size = 3): Generator<string> {
   for (let i = 0; i < text.length; i += size) yield text.slice(i, i + size)
 }
 
-async function streamChat(body: {
+interface ChatBody {
   messages?: Array<{ role: string; content: unknown }>
   response_format?: unknown
   json_schema?: unknown
   grammar?: unknown
   tools?: unknown[]
-}): Promise<Response> {
-  chatCalls++
-  const constrained = body.response_format !== undefined || body.json_schema !== undefined || body.grammar !== undefined
-  const toolScript = env.FAKE_TOOL_CALLS && chatCalls === 1 && Array.isArray(body.tools) ? JSON.parse(env.FAKE_TOOL_CALLS) : null
+}
 
-  let reply = env.FAKE_REPLY ?? 'Hello from the fake engine.'
-  if (constrained && env.FAKE_JSON_REPLY) reply = env.FAKE_JSON_REPLY
+function replyFor(body: ChatBody): Scripted {
+  if (script) return script[Math.min(chatCalls - 1, script.length - 1)]!
+  const constrained = body.response_format !== undefined || body.json_schema !== undefined || body.grammar !== undefined
+  let text = env.FAKE_REPLY ?? 'Hello from the fake engine.'
   if (env.FAKE_ECHO_LAST === '1') {
     const last = body.messages?.at(-1)
-    reply = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '')
+    text = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '')
   }
+  return { text, reasoning: constrained ? undefined : env.FAKE_REASONING }
+}
+
+async function streamChat(body: ChatBody): Promise<Response> {
+  chatCalls++
+  if (env.FAKE_LOG_REQUESTS) appendFileSync(env.FAKE_LOG_REQUESTS, JSON.stringify(body) + '\n')
+  const scripted = replyFor(body)
 
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (s: string) => controller.enqueue(encoder.encode(s))
-      if (env.FAKE_REASONING && !constrained) {
-        for (const p of pieces(env.FAKE_REASONING)) {
+      if (scripted.reasoning) {
+        for (const p of pieces(scripted.reasoning)) {
           send(chunk({ reasoning_content: p }))
           if (slowMs) await Bun.sleep(slowMs)
         }
       }
-      if (toolScript) {
-        const calls = toolScript as Array<{ name: string; arguments: unknown }>
-        calls.forEach((c, index) => {
+      if (scripted.toolCalls?.length) {
+        scripted.toolCalls.forEach((c, index) => {
           const args = typeof c.arguments === 'string' ? c.arguments : JSON.stringify(c.arguments)
-          send(chunk({ tool_calls: [{ index, id: `call_${index}`, type: 'function', function: { name: c.name, arguments: '' } }] }))
+          send(chunk({ tool_calls: [{ index, id: `call_${chatCalls}_${index}`, type: 'function', function: { name: c.name, arguments: '' } }] }))
           for (const p of pieces(args, 8)) send(chunk({ tool_calls: [{ index, function: { arguments: p } }] }))
         })
-        send(chunk({}, 'tool_calls', { prompt_tokens: 10, completion_tokens: 5 }))
+        send(chunk({}, scripted.finish ?? 'tool_calls', { prompt_tokens: 10, completion_tokens: 5 }))
       } else {
-        for (const p of pieces(reply)) {
+        const text = scripted.text ?? ''
+        for (const p of pieces(text)) {
           send(chunk({ content: p }))
           if (slowMs) await Bun.sleep(slowMs)
         }
-        send(chunk({}, 'stop', { prompt_tokens: 10, completion_tokens: reply.length }))
+        send(chunk({}, scripted.finish ?? 'stop', { prompt_tokens: 10, completion_tokens: text.length }))
       }
       send('data: [DONE]\n\n')
       controller.close()
@@ -108,12 +123,13 @@ Bun.serve({
     if (url.pathname === '/props') {
       return Response.json({
         model_path: model,
-        chat_template: env.FAKE_TEMPLATE ?? '{% for message in messages %}{{ message.content }}{% endfor %}{% if tools %}{{ tools }}{% endif %}',
+        chat_template:
+          env.FAKE_TEMPLATE ?? '{% for message in messages %}{{ message.content }}{% endfor %}{% if tools %}{{ tools }}{% endif %}',
         default_generation_settings: { n_ctx: 4096 },
       })
     }
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
-      return streamChat((await req.json()) as Parameters<typeof streamChat>[0])
+      return streamChat((await req.json()) as ChatBody)
     }
     if (url.pathname.startsWith('/slots/') && req.method === 'POST') {
       process.stderr.write('fake: slot erased\n')

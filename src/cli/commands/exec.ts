@@ -7,7 +7,9 @@
  */
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { runTurn } from '../../agent/loop'
+import { loadGrammar, loadOutputSchema, templateSupportsTools } from '../../agent/constrain'
+import { runAgent, type ToolMode } from '../../agent/loop'
+import { builtinRegistry } from '../../agent/tools/registry'
 import { generationFor, parseEffort } from '../../agent/effort'
 import type { ChatMessage } from '../../agent/messages'
 import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
@@ -36,12 +38,18 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --cwd <dir>                working directory for tools (default: current)
   --system-prompt <text>     system message; --system-prompt-file <path> reads it from a file
   --prompt-file <path>       read the prompt from a file ("-" as prompt reads stdin)
-  --tools <list|none>        built-in tools (phase 2); accepted now, ignored
+  --tools <list|none>        built-in tools: Read,Grep,Glob (default) or none
   --mcp-server name=<url>    MCP server (phase 3); accepted now, ignored
   --max-iterations <n>       tool-loop cap (default 25)
+  --output-schema <json|@f>  decode the final answer under this JSON Schema
+  --grammar <gbnf|@file>     decode the final answer under this GBNF grammar
   --stall-ms <n>             abort after this long with no output (default 120000)
   --wall-ms <n>              abort after this long in total (default 1800000)
-  --include-tool-io          put tool inputs/outputs on the wire`
+  --include-tool-io          put tool inputs/outputs on the wire
+
+  -c tool_mode=native|universal|none   native = the chat template's own (grammar-constrained)
+                             tool calls; universal = two schema-constrained steps; default is
+                             native when the template mentions tools, else universal.`
 
 const OPTIONS = {
   json: { type: 'boolean', default: false },
@@ -56,6 +64,8 @@ const OPTIONS = {
   tools: { type: 'string' },
   'mcp-server': { type: 'string', multiple: true },
   'max-iterations': { type: 'string', default: '25' },
+  'output-schema': { type: 'string' },
+  grammar: { type: 'string' },
   'stall-ms': { type: 'string', default: '120000' },
   'wall-ms': { type: 'string', default: '1800000' },
   'include-tool-io': { type: 'boolean', default: false },
@@ -104,6 +114,15 @@ export async function runExec(argv: string[]): Promise<number> {
   const systemPrompt = values['system-prompt-file']
     ? await readFile(values['system-prompt-file'], 'utf8')
     : (values['system-prompt'] ?? DEFAULT_SYSTEM_PROMPT)
+  const registry = builtinRegistry(values.tools)
+  const maxIterations = asInt(values['max-iterations'], '--max-iterations')
+  const outputSchema = values['output-schema'] ? await loadOutputSchema(values['output-schema']) : undefined
+  const grammar = values.grammar ? await loadGrammar(values.grammar) : undefined
+  if (outputSchema && grammar) throw new UsageError('--output-schema and --grammar cannot be combined')
+  const requestedMode = pairs.tool_mode
+  if (requestedMode !== undefined && !['native', 'universal', 'none'].includes(String(requestedMode))) {
+    throw new UsageError(`-c tool_mode must be native|universal|none, got "${String(requestedMode)}"`)
+  }
 
   const startedAt = Date.now()
   const controller = new AbortController()
@@ -162,19 +181,42 @@ export async function runExec(argv: string[]): Promise<number> {
     const toStore: ChatMessage[] = session ? [userMessage] : [messages[0]!, userMessage]
 
     const client = server.client
-    const turn = await runTurn({ client, messages, gen, signal: controller.signal, emit, onActivity: armStall })
-    toStore.push(turn.message)
+    // Native tool calling needs a template that knows about tools; otherwise the universal
+    // two-step, which constrains with an explicit schema and works with any template.
+    let toolMode: ToolMode = 'none'
+    if (registry.size > 0) {
+      if (requestedMode !== undefined) toolMode = String(requestedMode) as ToolMode
+      else toolMode = templateSupportsTools(await client.props(controller.signal)) ? 'native' : 'universal'
+    }
+
+    const result = await runAgent({
+      client,
+      messages,
+      gen,
+      registry,
+      toolMode,
+      toolContext: { cwd, signal: controller.signal },
+      maxIterations,
+      signal: controller.signal,
+      emit,
+      onActivity: armStall,
+      includeToolIo: values['include-tool-io'],
+      outputSchema,
+      grammar,
+    })
+    toStore.push(...result.produced)
     await appendMessages(sessionId, toStore)
 
     emit({
       type: 'turn.completed',
       sessionId,
       durationMs: Date.now() - startedAt,
-      iterations: 1,
-      usage: turn.usage,
-      stopReason: turn.finishReason === 'length' ? 'length' : 'stop',
+      iterations: result.iterations,
+      usage: result.usage,
+      stopReason: result.stopReason,
+      ...(result.output !== undefined ? { output: result.output } : {}),
     })
-    return 0
+    return result.stopReason === 'max_iterations' ? 1 : 0
   } catch (err) {
     const code: FailCode = failCode ?? (err instanceof ObrewError ? err.code : isAbortError(err) ? 'aborted' : 'engine_failed')
     const message =
