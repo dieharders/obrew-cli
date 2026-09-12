@@ -69,8 +69,10 @@ describe('obrew serve', () => {
     })
     expect(res2.status).toBe(200)
     const status2 = (await (await fetch(`${base}/obrew/status`)).json()) as { loaded: string; port: number }
+    // The loaded model is the swap; the port is not. `freePort()` prefers 8082 upwards and
+    // the engine we just replaced frees its port immediately, so the new one often rebinds it.
     expect(status2.loaded).toBe('o/r:b.gguf')
-    expect(status2.port).not.toBe(status1.port)
+    expect(status2.port).toBeGreaterThan(0)
   })
 
   test('an unknown model is 404, junk body 400', async () => {

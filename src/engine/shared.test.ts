@@ -45,7 +45,11 @@ describe('shared engine', () => {
     // and Windows that the replacement binds the very same port.
     expect(replaced?.pid).not.toBe(record!.pid)
     expect((await listRunning()).filter((r) => isAlive(r.pid))).toHaveLength(1)
-  })
+    // Two detached starts plus a health poll at 500 ms: on a Windows runner, where each one
+    // goes out through PowerShell and the WMI provider host, that does not fit bun's default
+    // 5 s. A timeout here also corrupts the NEXT test — the aborted acquire keeps running and
+    // writes its shared record into the following test's OBREW_HOME.
+  }, 60_000)
 
   test('ephemeral mode stops on release and never writes the record', async () => {
     const h = await acquireEngine({ mode: 'ephemeral', command, args: ['-m', 'e'], model: 'e', logPath: null })
