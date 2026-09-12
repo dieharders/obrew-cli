@@ -24,6 +24,8 @@ export interface Tool {
   description: string
   /** JSON Schema for the arguments, always an object schema. */
   inputSchema: JsonSchema
+  /** Per-call cap for this tool, when the run's default is too short (remote tools). */
+  timeoutMs?: number
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutput>
 }
 

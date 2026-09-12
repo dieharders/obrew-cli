@@ -10,6 +10,9 @@ import { resolve } from 'node:path'
 import { loadGrammar, loadOutputSchema, templateSupportsTools } from '../../agent/constrain'
 import { runAgent, type ToolMode } from '../../agent/loop'
 import { builtinRegistry } from '../../agent/tools/registry'
+import { McpClient } from '../../mcp/client'
+import { parseMcpServerSpec } from '../../mcp/spec'
+import { McpError } from '../../mcp/types'
 import { generationFor, parseEffort } from '../../agent/effort'
 import type { ChatMessage } from '../../agent/messages'
 import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
@@ -39,7 +42,8 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --system-prompt <text>     system message; --system-prompt-file <path> reads it from a file
   --prompt-file <path>       read the prompt from a file ("-" as prompt reads stdin)
   --tools <list|none>        built-in tools: Read,Grep,Glob (default) or none
-  --mcp-server name=<url>    MCP server (phase 3); accepted now, ignored
+  --mcp-server name=<url>    MCP server over streamable HTTP; or name=stdio:<command …>.
+                             Its tools appear as mcp__<name>__<tool>. Repeatable.
   --max-iterations <n>       tool-loop cap (default 25)
   --output-schema <json|@f>  decode the final answer under this JSON Schema
   --grammar <gbnf|@file>     decode the final answer under this GBNF grammar
@@ -115,6 +119,7 @@ export async function runExec(argv: string[]): Promise<number> {
     ? await readFile(values['system-prompt-file'], 'utf8')
     : (values['system-prompt'] ?? DEFAULT_SYSTEM_PROMPT)
   const registry = builtinRegistry(values.tools)
+  const mcpSpecs = (values['mcp-server'] ?? []).map(parseMcpServerSpec)
   const maxIterations = asInt(values['max-iterations'], '--max-iterations')
   const outputSchema = values['output-schema'] ? await loadOutputSchema(values['output-schema']) : undefined
   const grammar = values.grammar ? await loadGrammar(values.grammar) : undefined
@@ -144,6 +149,7 @@ export async function runExec(argv: string[]): Promise<number> {
   const wallTimer = setTimeout(() => stop('timeout'), wallMs)
 
   let server: LlamaServer | null = null
+  const mcpClients: McpClient[] = []
   const emit = (event: ExecEvent) => out.event(event)
 
   try {
@@ -151,6 +157,19 @@ export async function runExec(argv: string[]): Promise<number> {
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
+
+    // The host's tools, dialled per invocation. Connected before the engine starts so a dead
+    // URL fails fast, and so the model load and the handshake overlap nothing that matters.
+    for (const spec of mcpSpecs) {
+      try {
+        const client = await McpClient.connect(spec, { signal: controller.signal, cwd, log: out.log })
+        mcpClients.push(client)
+        for (const tool of await client.tools(controller.signal)) registry.add(tool)
+      } catch (err) {
+        if (err instanceof McpError) throw new ObrewError('tool_error', err.message)
+        throw err
+      }
+    }
 
     const session = resumeId ? await loadSession(resumeId) : null
     const sessionId = session?.header.id ?? newSessionId()
@@ -238,6 +257,7 @@ export async function runExec(argv: string[]): Promise<number> {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (server) await server.stop()
+    for (const client of mcpClients) await client.close().catch(() => {})
     untrack(controller)
   }
 }

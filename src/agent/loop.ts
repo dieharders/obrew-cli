@@ -280,7 +280,8 @@ async function executeCall(
   }
 
   try {
-    const out = await withTimeout(tool.execute(args, ctx), opts.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS, opts.signal)
+    const limit = opts.toolTimeoutMs ?? tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS
+    const out = await withTimeout(tool.execute(args, ctx), limit, opts.signal)
     return report(!out.isError, out.content)
   } catch (err) {
     if (err instanceof ObrewError && err.code === 'aborted') throw err

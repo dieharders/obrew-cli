@@ -167,3 +167,47 @@ describe('obrew exec --json with tools', () => {
     expect(events.at(-1)).toMatchObject({ type: 'turn.completed', stopReason: 'max_iterations', iterations: 2 })
   }, TIMEOUT_MS)
 })
+
+describe('obrew exec --json with an MCP server', () => {
+  let home: Awaited<ReturnType<typeof tempHome>>
+  beforeEach(async () => {
+    home = await tempHome()
+    const modelPath = join(home.dir, 'models', 'org--repo', 'm.gguf')
+    await mkdir(join(home.dir, 'models', 'org--repo'), { recursive: true })
+    await writeFile(modelPath, 'GGUF')
+    await saveRegistry({
+      version: 1,
+      default: 'org/repo:m.gguf',
+      models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: null, sizeBytes: 4, addedAt: '' }],
+    })
+  })
+  afterEach(() => home.cleanup())
+
+  test('dials the server, exposes mcp__<name>__<tool>, and feeds results back', async () => {
+    const { startFakeMcp } = await import('../../../test/fixtures/fake-mcp')
+    const fake = startFakeMcp()
+    try {
+      const script = JSON.stringify([
+        { toolCalls: [{ name: 'mcp__host__add', arguments: { a: 40, b: 2 } }] },
+        { toolCalls: [{ name: 'mcp__host__fail', arguments: {} }] },
+        { text: 'forty-two' },
+      ])
+      const { events, code } = await run(['exec', '--json', '--tools', 'none', '--mcp-server', `host=${fake.url}`, 'add them'], { FAKE_SCRIPT: script })
+      expect(code).toBe(0)
+      const starts = events.filter((e) => e.type === 'tool.start').map((e) => (e as { name: string }).name)
+      expect(starts).toEqual(['mcp__host__add', 'mcp__host__fail'])
+      const results = events.filter((e) => e.type === 'tool.result') as Array<{ ok: boolean }>
+      expect(results.map((r) => r.ok)).toEqual([true, false])
+      expect(events.at(-1)).toMatchObject({ type: 'turn.completed', iterations: 3 })
+    } finally {
+      fake.stop()
+    }
+  }, TIMEOUT_MS)
+
+  test('an unreachable server is a tool_error failure before the engine starts', async () => {
+    const { events, code } = await run(['exec', '--json', '--mcp-server', 'dead=http://127.0.0.1:1/mcp', 'hi'])
+    expect(code).toBe(1)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.failed', code: 'tool_error' })
+    expect(events.some((e) => e.type === 'engine.status')).toBe(false)
+  }, TIMEOUT_MS)
+})
