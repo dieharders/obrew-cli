@@ -1,4 +1,7 @@
-# Tag `vX.Y.Z` → one executable per platform on the GitHub release, plus SHA256SUMS.
+# Existing tag `vX.Y.Z` → one executable per platform on the GitHub release, plus SHA256SUMS.
+#
+# Run manually only (Actions → Release → Run workflow), so pushing a tag never publishes on
+# its own. Push the tag first, then dispatch this with that tag name.
 #
 # Asset names are the contract with hosts that install obrew for the user: MotionBuff's
 # managed installer fetches `obrew-<target>[.exe]` from the latest release and verifies the
@@ -6,8 +9,12 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist, e.g. v1.2.3)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -28,6 +37,8 @@ jobs:
         run: ./dist/obrew-linux-x64 --version
       - uses: softprops/action-gh-release@v2
         with:
+          # The checkout is a detached tag, not a tag ref, so name the release explicitly.
+          tag_name: ${{ inputs.tag }}
           files: |
             dist/obrew-windows-x64.exe
             dist/obrew-darwin-arm64

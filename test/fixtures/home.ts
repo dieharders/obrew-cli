@@ -2,12 +2,14 @@
  * A throwaway `OBREW_HOME` per test, so registry / config / session writes never touch the
  * real data directory. Modules read `OBREW_HOME` at call time, so setting it here is enough.
  */
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export async function tempHome(): Promise<{ dir: string; cleanup: () => Promise<void> }> {
-  const dir = await mkdtemp(join(tmpdir(), 'obrew-test-'))
+  // Real path: `tmpdir()` is a symlink on macOS and an 8.3 short name on Windows, so a test
+  // that compares `dir` against a path the code resolved would fail only on those platforms.
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'obrew-test-')))
   const previous = process.env.OBREW_HOME
   process.env.OBREW_HOME = dir
   return {

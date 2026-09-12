@@ -1,9 +1,21 @@
+# Typecheck, lint, test and a build smoke across all three OSes.
+#
+# Manual only (Actions → CI → Run workflow). Nothing triggers it automatically: the three-OS
+# matrix builds the binary on every run, which is too expensive to spend on each PR push.
+# Run it by hand when a change touches anything platform-dependent — process spawning, path
+# handling, the engine lifecycle — where a local Windows run alone isn't proof.
+#
+# Day to day, the same checks run locally and for free: `bun run typecheck`, `bun run lint`,
+# `bun test ./src ./test`.
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or SHA to check (default: the branch you picked above)'
+        required: false
+        type: string
 
 jobs:
   check:
@@ -13,7 +25,10 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # Empty `ref` is what checkout already defaults to: whatever branch the dispatch chose.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0

@@ -37,9 +37,13 @@ describe('shared engine', () => {
 
     const third = await acquire('m2')
     expect(third.started).toBe(true)
-    expect(third.port).not.toBe(first.port)
     expect(isAlive(record!.pid)).toBe(false)
-    expect((await readShared())?.model).toBe('m2')
+    const replaced = await readShared()
+    expect(replaced?.model).toBe('m2')
+    // A different PROCESS is what "replaces it" means; the port is not part of the contract.
+    // `freePort()` prefers 8082, and the engine we just killed frees it fast enough on macOS
+    // and Windows that the replacement binds the very same port.
+    expect(replaced?.pid).not.toBe(record!.pid)
     expect((await listRunning()).filter((r) => isAlive(r.pid))).toHaveLength(1)
   })
 
