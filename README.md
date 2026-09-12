@@ -69,6 +69,17 @@ inspect and control it.
 and `POST /obrew/models/pull` (SSE progress). The `model` field picks the model and swaps the
 engine when it differs.
 
+## Vision, search, embeddings
+
+- `obrew exec --image still.png "what is shown?"` attaches images to a model pulled with
+  `--mmproj`. The transcript keeps a marker per image, not the bytes.
+- `--tools Read,Grep,Glob,WebSearch` adds a DuckDuckGo-backed search tool (opt-in).
+- `obrew models pull nomic-ai/nomic-embed-text-v1.5-GGUF && obrew models use --embed <id>` sets
+  an embedding model; `obrew embed --query "…" "text a" "text b"` ranks texts by cosine
+  similarity, `obrew embed --image x.png` embeds an image with a vision embedding model, and
+  `serve` answers `/v1/embeddings`. Embeddings are in-memory only: nothing is stored between
+  runs, by design.
+
 ## Where things live
 
 `%LOCALAPPDATA%\Obrew` on Windows, `~/Library/Application Support/Obrew` on macOS,
