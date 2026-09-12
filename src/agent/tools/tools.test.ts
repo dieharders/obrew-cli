@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { globTool } from './glob'
@@ -12,7 +12,10 @@ describe('built-in tools', () => {
   const ctx = () => ({ cwd, signal: new AbortController().signal })
 
   beforeAll(async () => {
-    cwd = await mkdtemp(join(tmpdir(), 'obrew-tools-'))
+    // Real path, not the raw mkdtemp one: the tools relativise their results against the
+    // fence's real cwd, so a /var → /private/var (macOS) or 8.3 (Windows) temp dir would
+    // make every "relative" path come back as a ../../.. escape hatch.
+    cwd = await realpath(await mkdtemp(join(tmpdir(), 'obrew-tools-')))
     await mkdir(join(cwd, 'src', 'deep'), { recursive: true })
     await mkdir(join(cwd, 'node_modules', 'pkg'), { recursive: true })
     await writeFile(join(cwd, 'src', 'a.ts'), 'const a = 1\nexport const needle = "here"\nconst b = 2\n')

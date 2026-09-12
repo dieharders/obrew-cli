@@ -14,7 +14,6 @@ describe('obrew serve', () => {
   beforeEach(async () => {
     home = await tempHome()
     process.env.OBREW_LLAMA_SERVER = FAKE_SERVER
-    process.env.FAKE_REPLY = 'served'
     const dir = join(home.dir, 'models', 'o--r')
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'a.gguf'), 'GGUF')
@@ -35,7 +34,6 @@ describe('obrew serve', () => {
     await server.stop()
     await stopShared()
     delete process.env.OBREW_LLAMA_SERVER
-    delete process.env.FAKE_REPLY
     await home.cleanup()
   })
 
@@ -54,7 +52,10 @@ describe('obrew serve', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/event-stream')
     const text = await res.text()
-    // A detached engine does not inherit this process's env, so the fake's default reply.
+    // The fake's DEFAULT reply, and no FAKE_REPLY is set anywhere in this file: whether a
+    // detached engine inherits our env is platform-specific — `nohup` on POSIX passes it
+    // straight down, while a process created through Win32_Process.Create gets the WMI
+    // host's environment instead. Asserting on an env-driven reply only works on Windows.
     expect(text).toContain('"content":"Hel"')
     expect(text).toContain('[DONE]')
 
