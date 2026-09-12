@@ -22,7 +22,7 @@ import { grammarBody, jsonSchemaBody, nativeToolsBody } from './constrain'
 import type { GenerationSettings } from './effort'
 import type { ChatMessage, ToolCall } from './messages'
 import type { ToolRegistry } from './tools/registry'
-import type { JsonSchema, ToolContext } from './tools/types'
+import type { JsonSchema, ToolContext, ToolOutput } from './tools/types'
 import { describeViolations, validate } from './tools/validate'
 import { runTurn, type TurnResult } from './turn'
 import { universalSelect } from './universal'
@@ -173,7 +173,14 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
 
     for (const call of calls) {
       const result = await executeCall(call, messages, opts, toolCtx)
-      push({ role: 'tool', tool_call_id: call.id, content: result })
+      push({ role: 'tool', tool_call_id: call.id, content: result.content })
+      if (result.images?.length) {
+        // The images ride in a user message (tool results are text on the wire). The
+        // transcript keeps a marker instead of the base64, as `exec --image` does.
+        const label = `Image from ${call.function.name}:`
+        messages.push({ role: 'user', content: [{ type: 'text', text: label }, ...result.images] })
+        produced.push({ role: 'user', content: `${label} [image]` })
+      }
     }
 
     if (repeated) {
@@ -220,17 +227,22 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
   return { produced, finalText, iterations, usage: sawUsage ? usage : null, stopReason, output }
 }
 
-/** Validate, repair once if needed, run, and report — always returning a string result. */
+interface CallResult {
+  content: string
+  images?: ToolOutput['images']
+}
+
+/** Validate, repair once if needed, run, and report — always returning a result, never throwing. */
 async function executeCall(
   call: ToolCall,
   messages: ChatMessage[],
   opts: AgentOptions,
   ctx: ToolContext,
-): Promise<string> {
+): Promise<CallResult> {
   const name = call.function.name
   const tool = opts.registry.get(name)
   const startedAt = Date.now()
-  const report = (ok: boolean, content: string) => {
+  const report = (ok: boolean, content: string, images?: ToolOutput['images']): CallResult => {
     opts.emit({
       type: 'tool.result',
       id: call.id,
@@ -240,7 +252,7 @@ async function executeCall(
       bytes: Buffer.byteLength(content),
       ...(opts.includeToolIo ? { output: content } : {}),
     })
-    return content
+    return { content, images }
   }
 
   if (!tool) {
@@ -282,7 +294,7 @@ async function executeCall(
   try {
     const limit = opts.toolTimeoutMs ?? tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS
     const out = await withTimeout(tool.execute(args, ctx), limit, opts.signal)
-    return report(!out.isError, out.content)
+    return report(!out.isError, out.content, out.images)
   } catch (err) {
     if (err instanceof ObrewError && err.code === 'aborted') throw err
     return report(false, `Error: ${err instanceof Error ? err.message : String(err)}`)

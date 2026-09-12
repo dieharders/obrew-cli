@@ -34,6 +34,8 @@ export const SharedRecordSchema = z.object({
   key: z.string(),
   startedAt: z.string(),
   lastUsed: z.number(),
+  /** How long the engine may sit idle before a later run reaps it. */
+  idleTtlMs: z.number().optional(),
 })
 export type SharedRecord = z.infer<typeof SharedRecordSchema>
 
@@ -58,9 +60,9 @@ async function writeShared(record: SharedRecord): Promise<void> {
   await Bun.write(path, JSON.stringify(record))
 }
 
-export async function touchShared(): Promise<void> {
+export async function touchShared(idleTtlMs?: number): Promise<void> {
   const record = await readShared()
-  if (record) await writeShared({ ...record, lastUsed: Date.now() })
+  if (record) await writeShared({ ...record, lastUsed: Date.now(), ...(idleTtlMs ? { idleTtlMs } : {}) })
 }
 
 /** Kill the recorded engine if it is still running, and drop the record. */
@@ -81,15 +83,19 @@ export async function stopShared(): Promise<boolean> {
   return killed
 }
 
-/** Stop the shared engine if nobody has used it for `ttlMs`. Returns true when reaped. */
-export async function reapIdleShared(ttlMs = DEFAULT_IDLE_TTL_MS): Promise<boolean> {
+/**
+ * Stop the shared engine if nobody has used it for its TTL (the record's own, else the
+ * caller's, else the default). Returns true when reaped.
+ */
+export async function reapIdleShared(ttlMs?: number): Promise<boolean> {
   const record = await readShared()
   if (!record) return false
   if (!isAlive(record.pid)) {
     await stopShared()
     return false
   }
-  if (Date.now() - record.lastUsed < ttlMs) return false
+  const ttl = record.idleTtlMs ?? ttlMs ?? DEFAULT_IDLE_TTL_MS
+  if (Date.now() - record.lastUsed < ttl) return false
   return stopShared()
 }
 
@@ -130,6 +136,8 @@ export interface AcquireOptions {
   log?: (message: string) => void
   env?: Record<string, string | undefined>
   logPath?: string | null
+  /** Idle TTL to record on a shared engine (a host with long non-model phases raises it). */
+  idleTtlMs?: number
 }
 
 /**
@@ -145,16 +153,10 @@ export async function acquireEngine(opts: AcquireOptions): Promise<EngineHandle>
       const alive = isAlive(existing.pid) && (await client.health()) === 'ok'
       if (alive && existing.key === key) {
         opts.log?.(`engine: reusing shared llama-server pid ${existing.pid} on port ${existing.port}`)
-        await touchShared()
+        const touch = () => touchShared(opts.idleTtlMs)
+        await touch()
         opts.onStatus?.('ready')
-        return {
-          client,
-          port: existing.port,
-          shared: true,
-          started: false,
-          touch: touchShared,
-          release: touchShared,
-        }
+        return { client, port: existing.port, shared: true, started: false, touch, release: touch }
       }
       opts.log?.(alive ? 'engine: shared llama-server runs a different model; replacing it' : 'engine: stale shared record; cleaning up')
       await stopShared()
@@ -188,9 +190,18 @@ export async function acquireEngine(opts: AcquireOptions): Promise<EngineHandle>
       await removeRunning(pid)
       throw err
     }
-    await writeShared({ pid, port, model: opts.model, key, startedAt: new Date().toISOString(), lastUsed: Date.now() })
+    await writeShared({
+      pid,
+      port,
+      model: opts.model,
+      key,
+      startedAt: new Date().toISOString(),
+      lastUsed: Date.now(),
+      ...(opts.idleTtlMs ? { idleTtlMs: opts.idleTtlMs } : {}),
+    })
     opts.log?.(`engine: started shared llama-server pid ${pid} on port ${port}`)
-    return { client, port, shared: true, started: true, touch: touchShared, release: touchShared }
+    const touch = () => touchShared(opts.idleTtlMs)
+    return { client, port, shared: true, started: true, touch, release: touch }
   }
 
   const server = await LlamaServer.start({

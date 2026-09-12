@@ -54,7 +54,8 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --include-tool-io          put tool inputs/outputs on the wire
   --engine shared|ephemeral  shared (default) keeps llama-server warm across runs and reuses
                              it when the model and flags match; ephemeral stops it on exit.
-                             OBREW_ENGINE sets the default.
+                             OBREW_ENGINE sets the default. -c engine_idle_ms=N sets how long
+                             the shared engine may idle before a later run stops it.
 
   -c tool_mode=native|universal|none   native = the chat template's own (grammar-constrained)
                              tool calls; universal = two schema-constrained steps; default is
@@ -151,16 +152,31 @@ export async function runExec(argv: string[]): Promise<number> {
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
 
+  // The stall timer watches for a SILENT engine. While a tool runs there is nothing to hear
+  // from the engine, so the timer is suspended between tool.start and tool.result; the tool's
+  // own timeout (and the wall clock) bound that stretch instead.
   let stallTimer: ReturnType<typeof setTimeout> | null = null
+  let toolRunning = false
   const armStall = () => {
     if (stallTimer) clearTimeout(stallTimer)
+    if (toolRunning) return
     stallTimer = setTimeout(() => stop('timeout'), stallMs)
   }
   const wallTimer = setTimeout(() => stop('timeout'), wallMs)
 
   let handle: EngineHandle | null = null
   const mcpClients: McpClient[] = []
-  const emit = (event: ExecEvent) => out.event(event)
+  const emit = (event: ExecEvent) => {
+    if (event.type === 'tool.start') {
+      toolRunning = true
+      if (stallTimer) clearTimeout(stallTimer)
+    } else if (event.type === 'tool.result') {
+      toolRunning = false
+      armStall()
+    }
+    out.event(event)
+  }
+  const idleTtlMs = pairs.engine_idle_ms !== undefined ? asInt(pairs.engine_idle_ms, '-c engine_idle_ms') : undefined
 
   try {
     await reapOrphans(out.log)
@@ -203,6 +219,7 @@ export async function runExec(argv: string[]): Promise<number> {
       model: model.id,
       signal: controller.signal,
       log: out.log,
+      idleTtlMs,
       onStatus: (state) => {
         armStall()
         emit({ type: 'engine.status', state })
@@ -242,7 +259,7 @@ export async function runExec(argv: string[]): Promise<number> {
       gen,
       registry,
       toolMode,
-      toolContext: { cwd, signal: controller.signal },
+      toolContext: { cwd, signal: controller.signal, vision: Boolean(model.mmprojPath) },
       maxIterations,
       signal: controller.signal,
       emit,
@@ -263,7 +280,9 @@ export async function runExec(argv: string[]): Promise<number> {
       stopReason: result.stopReason,
       ...(result.output !== undefined ? { output: result.output } : {}),
     })
-    return result.stopReason === 'max_iterations' ? 1 : 0
+    // A completed turn exits 0 whatever stopped it; `stopReason` says whether it was the
+    // iteration cap. Exit 1 here made a host treat a persisted, finished turn as a failure.
+    return 0
   } catch (err) {
     const code: FailCode = failCode ?? (err instanceof ObrewError ? err.code : isAbortError(err) ? 'aborted' : 'engine_failed')
     const message =

@@ -161,10 +161,10 @@ describe('obrew exec --json with tools', () => {
     expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 7 } })
   }, TIMEOUT_MS)
 
-  test('--max-iterations exhaustion reports max_iterations and exits 1', async () => {
+  test('--max-iterations exhaustion reports max_iterations on a completed turn (exit 0)', async () => {
     const script = JSON.stringify([{ toolCalls: [{ name: 'Glob', arguments: { pattern: '*' } }] }])
     const { events, code } = await run(['exec', '--json', '--cwd', cwd, '--max-iterations', '2', 'loop'], { FAKE_SCRIPT: script })
-    expect(code).toBe(1)
+    expect(code).toBe(0)
     expect(events.at(-1)).toMatchObject({ type: 'turn.completed', stopReason: 'max_iterations', iterations: 2 })
   }, TIMEOUT_MS)
 })
@@ -295,5 +295,51 @@ describe('obrew exec --image', () => {
     const { events, code } = await run(['exec', '--json', '--image', join(home.dir, 'still.png'), 'describe'])
     expect(code).toBe(1)
     expect(events.at(-1)).toMatchObject({ type: 'turn.failed', code: 'bad_request' })
+  }, TIMEOUT_MS)
+})
+
+describe('obrew exec: images through Read', () => {
+  let home: Awaited<ReturnType<typeof tempHome>>
+  let cwd: string
+  let modelPath: string
+  beforeEach(async () => {
+    home = await tempHome()
+    modelPath = join(home.dir, 'models', 'org--repo', 'm.gguf')
+    await mkdir(join(home.dir, 'models', 'org--repo'), { recursive: true })
+    await writeFile(modelPath, 'GGUF')
+    cwd = join(home.dir, 'job')
+    await mkdir(join(cwd, 'stills'), { recursive: true })
+    await writeFile(join(cwd, 'stills', 'slide-1.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  })
+  afterEach(() => home.cleanup())
+
+  const registry = (mmproj: string | null) =>
+    saveRegistry({
+      version: 1,
+      default: 'org/repo:m.gguf',
+      models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: mmproj, sizeBytes: 4, addedAt: '' }],
+    })
+
+  test('with a vision model, Read of a still hands the model the image', async () => {
+    await registry(join(home.dir, 'mmproj.gguf'))
+    const log = join(home.dir, 'requests.jsonl')
+    const script = JSON.stringify([{ toolCalls: [{ name: 'Read', arguments: { path: 'stills/slide-1.png' } }] }, { text: 'a slide' }])
+    const { events, code } = await run(['exec', '--json', '--cwd', cwd, 'critique'], { FAKE_SCRIPT: script, FAKE_LOG_REQUESTS: log })
+    expect(code).toBe(0)
+    expect(events.find((e) => e.type === 'tool.result')).toMatchObject({ ok: true })
+    const second = JSON.parse((await Bun.file(log).text()).trim().split('\n')[1]!) as { messages: Array<{ role: string; content: unknown }> }
+    const last = second.messages.at(-1)!
+    expect(last.role).toBe('user')
+    expect(JSON.stringify(last.content)).toContain('data:image/png;base64,iVBORw==')
+  }, TIMEOUT_MS)
+
+  test('without a vision model, Read of a still is an error result, not a base64 dump', async () => {
+    await registry(null)
+    const script = JSON.stringify([{ toolCalls: [{ name: 'Read', arguments: { path: 'stills/slide-1.png' } }] }, { text: 'cannot see' }])
+    const { events, code } = await run(['exec', '--json', '--cwd', cwd, '--include-tool-io', 'critique'], { FAKE_SCRIPT: script })
+    expect(code).toBe(0)
+    const result = events.find((e) => e.type === 'tool.result') as { ok: boolean; output?: string }
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/cannot see images/)
   }, TIMEOUT_MS)
 })

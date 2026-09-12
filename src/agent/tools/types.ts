@@ -9,6 +9,8 @@ export interface ToolContext {
   /** The fence: the only directory the file tools may read. */
   cwd: string
   signal: AbortSignal
+  /** Whether the loaded model can see images (it was loaded with a vision projector). */
+  vision?: boolean
 }
 
 export interface ToolOutput {
@@ -16,6 +18,17 @@ export interface ToolOutput {
   content: string
   /** A failed call: reported to the model as a result, not raised out of the loop. */
   isError?: boolean
+  /**
+   * Images for the model to look at. A tool result is text on the wire, so the loop follows
+   * the result with a user message carrying these as image parts — the way a Read of a
+   * rendered still reaches a vision model.
+   */
+  images?: ImagePart[]
+}
+
+export interface ImagePart {
+  type: 'image_url'
+  image_url: { url: string }
 }
 
 export interface Tool {
