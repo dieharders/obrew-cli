@@ -13,6 +13,7 @@
 import { launchArgs, loadOptionsFrom } from '../engine/flags'
 import { engineStatus, requireEngine } from '../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../engine/shared'
+import { EmbeddingEngine } from '../embed/engine'
 import { pullModel } from '../models/pull'
 import { loadRegistry, removeModel, resolveModel, type ModelEntry } from '../models/registry'
 import { DEFAULT_CTX_SIZE, hfToken, loadConfig } from '../shared/config'
@@ -37,6 +38,7 @@ const error = (status: number, message: string, type = 'invalid_request_error') 
 
 export class ObrewServer {
   private engine: EngineHandle | null = null
+  private embedder: EmbeddingEngine | null = null
   private loaded: ModelEntry | null = null
   private loading: Promise<EngineHandle> | null = null
   private server: ReturnType<typeof Bun.serve> | null = null
@@ -121,6 +123,29 @@ export class ObrewServer {
     })
   }
 
+  /** OpenAI `/v1/embeddings`: `input` is a string or an array of strings. */
+  private async embeddings(req: Request): Promise<Response> {
+    const body = (await req.json().catch(() => null)) as { input?: unknown; model?: string } | null
+    const inputs = typeof body?.input === 'string' ? [body.input] : Array.isArray(body?.input) ? body.input.map(String) : null
+    if (!inputs || inputs.length === 0) return error(400, 'input must be a string or an array of strings')
+    try {
+      if (!this.embedder || (body?.model && body.model !== 'default' && this.embedder.model.id !== body.model)) {
+        await this.embedder?.close()
+        this.embedder = await EmbeddingEngine.open(body?.model && body.model !== 'default' ? body.model : undefined)
+      }
+      const vectors = await this.embedder.embedMany(inputs)
+      return json({
+        object: 'list',
+        data: vectors.map((embedding, index) => ({ object: 'embedding', index, embedding })),
+        model: this.embedder.model.id,
+        usage: { prompt_tokens: 0, total_tokens: 0 },
+      })
+    } catch (err) {
+      if (err instanceof ObrewError) return error(err.code === 'model_missing' ? 404 : 503, err.message, err.code)
+      throw err
+    }
+  }
+
   private async pull(req: Request): Promise<Response> {
     const body = (await req.json().catch(() => null)) as { spec?: string; mmproj?: boolean | string } | null
     if (!body?.spec) return error(400, 'spec (org/repo[:file]) is required')
@@ -188,7 +213,7 @@ export class ObrewServer {
     if ((path === '/v1/chat/completions' || path === '/v1/completions') && req.method === 'POST') {
       return this.proxy(path, req)
     }
-    if (path === '/v1/embeddings') return error(501, 'embeddings arrive in a later phase', 'not_implemented')
+    if (path === '/v1/embeddings' && req.method === 'POST') return this.embeddings(req)
 
     if (path === '/obrew/status' && req.method === 'GET') {
       const status = await engineStatus()
@@ -235,5 +260,8 @@ export class ObrewServer {
     if (this.reaper) clearInterval(this.reaper)
     this.server?.stop(true)
     this.server = null
+    // The embedding engine is attached (ours); the chat engine is shared and stays warm.
+    await this.embedder?.close()
+    this.embedder = null
   }
 }

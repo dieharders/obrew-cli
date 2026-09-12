@@ -113,12 +113,16 @@ export class EngineClient {
     }
   }
 
-  /** POST /embeddings (native endpoint). Handles the response shapes llama.cpp has used. */
-  async embed(input: string, signal?: AbortSignal): Promise<number[]> {
+  /**
+   * POST /embeddings (native endpoint). Handles the response shapes llama.cpp has used.
+   * For an image, `content` carries the `[img-N]` placeholder and `imageData` the bytes —
+   * llama.cpp's multimodal embedding contract (obrew-engine's image_embedder.py).
+   */
+  async embed(input: string, signal?: AbortSignal, imageData?: Array<{ id: number; data: string }>): Promise<number[]> {
     const res = await fetch(`${this.baseUrl}/embeddings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content: input }),
+      body: JSON.stringify({ content: input, ...(imageData ? { image_data: imageData } : {}) }),
       signal,
     })
     if (!res.ok) throw new ObrewError('engine_failed', `embeddings failed: HTTP ${res.status}`)

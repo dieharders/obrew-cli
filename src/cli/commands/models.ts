@@ -2,10 +2,10 @@
  * `obrew models list|pull|rm|use`
  */
 import { pullModel } from '../../models/pull'
-import { loadRegistry, removeModel, setDefault } from '../../models/registry'
-import { hfToken, loadConfig } from '../../shared/config'
+import { findModel, loadRegistry, removeModel, setDefault } from '../../models/registry'
+import { hfToken, loadConfig, saveConfig } from '../../shared/config'
 import { humanBytes } from '../../shared/download'
-import { UsageError } from '../../shared/errors'
+import { ObrewError, UsageError } from '../../shared/errors'
 import { track, untrack } from '../../shared/proc'
 import { parse } from '../args'
 import { createOutput } from '../output'
@@ -13,7 +13,8 @@ import { createOutput } from '../output'
 const HELP = `obrew models list [--json]
 obrew models pull <org/repo[:file.gguf]> [--mmproj] [--mmproj-file <name>] [--json]
 obrew models rm <id>
-obrew models use <id>`
+obrew models use <id>            make it the default chat model
+obrew models use --embed <id>    make it the embedding model`
 
 export async function runModels(argv: string[]): Promise<number> {
   const { values, positionals } = parse(argv, {
@@ -21,6 +22,7 @@ export async function runModels(argv: string[]): Promise<number> {
     help: { type: 'boolean', short: 'h', default: false },
     mmproj: { type: 'boolean', default: false },
     'mmproj-file': { type: 'string' },
+    embed: { type: 'boolean', default: false },
   } as const)
   if (values.help) {
     console.log(HELP)
@@ -77,6 +79,14 @@ export async function runModels(argv: string[]): Promise<number> {
     }
     case 'use': {
       if (!arg) throw new UsageError('use needs a model id')
+      if (values.embed) {
+        const registry = await loadRegistry()
+        const entry = findModel(registry, arg)
+        if (!entry) throw new ObrewError('model_missing', `no installed model matches "${arg}"`)
+        await saveConfig({ ...(await loadConfig()), embedModel: entry.id })
+        console.log(`embedding model: ${entry.id}`)
+        return 0
+      }
       const entry = await setDefault(arg)
       console.log(`default model: ${entry.id}`)
       return 0

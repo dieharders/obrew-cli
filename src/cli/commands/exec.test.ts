@@ -253,3 +253,47 @@ describe('obrew exec --engine shared', () => {
     await expect(fetch(`http://127.0.0.1:${port1}/health`)).rejects.toThrow()
   }, TIMEOUT_MS)
 })
+
+describe('obrew exec --image', () => {
+  let home: Awaited<ReturnType<typeof tempHome>>
+  let modelPath: string
+  beforeEach(async () => {
+    home = await tempHome()
+    modelPath = join(home.dir, 'models', 'org--repo', 'm.gguf')
+    await mkdir(join(home.dir, 'models', 'org--repo'), { recursive: true })
+    await writeFile(modelPath, 'GGUF')
+    await writeFile(join(home.dir, 'still.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  })
+  afterEach(() => home.cleanup())
+
+  const registry = (mmproj: string | null) =>
+    saveRegistry({
+      version: 1,
+      default: 'org/repo:m.gguf',
+      models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: mmproj, sizeBytes: 4, addedAt: '' }],
+    })
+
+  test('sends the image as a data URL part and keeps a marker in the transcript', async () => {
+    await registry(join(home.dir, 'mmproj.gguf'))
+    const log = join(home.dir, 'requests.jsonl')
+    const { events, code } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], { FAKE_LOG_REQUESTS: log, FAKE_REPLY: 'a picture' })
+    expect(code).toBe(0)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    const user = req.messages.find((m) => m.role === 'user')!
+    expect(user.content).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw==' } },
+      { type: 'text', text: 'describe' },
+    ])
+    const session = events.find((e) => e.type === 'session') as { sessionId: string }
+    const show = Bun.spawnSync([process.execPath, MAIN, 'sessions', 'show', session.sessionId, '--json'], { env: process.env })
+    const stored = JSON.parse(show.stdout.toString()) as { messages: Array<{ role: string; content: string }> }
+    expect(stored.messages[1]!.content).toMatch(/^\[image: .*still\.png\]\ndescribe$/)
+  }, TIMEOUT_MS)
+
+  test('a model without an mmproj refuses --image as bad_request', async () => {
+    await registry(null)
+    const { events, code } = await run(['exec', '--json', '--image', join(home.dir, 'still.png'), 'describe'])
+    expect(code).toBe(1)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.failed', code: 'bad_request' })
+  }, TIMEOUT_MS)
+})

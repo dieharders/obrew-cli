@@ -72,14 +72,30 @@ describe('obrew serve', () => {
     expect(status2.port).not.toBe(status1.port)
   })
 
-  test('an unknown model is 404, embeddings 501, junk body 400', async () => {
+  test('an unknown model is 404, junk body 400', async () => {
     const missing = await fetch(`${base}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'nope', messages: [] }),
     })
     expect(missing.status).toBe(404)
-    expect((await fetch(`${base}/v1/embeddings`, { method: 'POST' })).status).toBe(501)
     expect((await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: 'x' })).status).toBe(400)
+  })
+
+  test('/v1/embeddings answers in the OpenAI shape once an embedding model is set', async () => {
+    const none = await fetch(`${base}/v1/embeddings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'x' }) })
+    expect(none.status).toBe(404)
+    const { saveConfig } = await import('../shared/config')
+    await saveConfig({ embedModel: 'o/r:b.gguf' })
+    const res = await fetch(`${base}/v1/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input: ['ab', 'cdef'] }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { object: string; model: string; data: Array<{ index: number; embedding: number[] }> }
+    expect(body.object).toBe('list')
+    expect(body.model).toBe('o/r:b.gguf')
+    expect(body.data.map((d) => d.embedding)).toEqual([[2, 1, 0], [4, 1, 0]])
   })
 })

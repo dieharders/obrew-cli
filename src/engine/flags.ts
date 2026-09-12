@@ -21,6 +21,8 @@ export interface LoadOptions {
   mmprojPath?: string
   /** `auto` (default) splits <think> blocks into reasoning_content; `none` leaves them inline. */
   reasoningFormat?: 'auto' | 'none' | 'deepseek' | 'deepseek-legacy'
+  /** An embedding server: `--embedding --pooling mean`, no chat. */
+  embedding?: boolean
   /** Raw extra flags for anything not modelled here. */
   extra?: string[]
 }
@@ -47,6 +49,7 @@ export function launchArgs(modelPath: string, port: number | null, opts: LoadOpt
   if (opts.cacheTypeV) args.push('--cache-type-v', opts.cacheTypeV)
   if (opts.mmprojPath) args.push('--mmproj', opts.mmprojPath)
   if (opts.reasoningFormat) args.push('--reasoning-format', opts.reasoningFormat)
+  if (opts.embedding) args.push('--embedding', '--pooling', 'mean')
   if (opts.extra) args.push(...opts.extra)
   return args
 }

@@ -22,6 +22,8 @@ export const ConfigSchema = z.object({
   loginModel: z.string().optional(),
   /** Default context window passed to llama-server. `-c ctx_size=` overrides per run. */
   ctxSize: z.number().int().positive().optional(),
+  /** Registry id of the embedding model (`obrew models use --embed <id>`). */
+  embedModel: z.string().optional(),
 })
 export type Config = z.infer<typeof ConfigSchema>
 
