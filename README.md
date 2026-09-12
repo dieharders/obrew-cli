@@ -49,6 +49,13 @@ is reported back to the model as a result; it never ends the run.
 `--output-schema '{...}'` (or `@file.json`) decodes the final answer under a schema and puts the
 parsed value on `turn.completed.output`; `--grammar @file.gbnf` does the same with GBNF.
 
+## MCP servers
+
+`--mcp-server name=http://127.0.0.1:1234/mcp` dials a streamable-HTTP MCP server for this run
+only; `--mcp-server name=stdio:<command …>` launches one as a child process. Its tools appear
+to the model as `mcp__<name>__<tool>`, get the same schema validation as built-ins, and a
+result the server marks `isError` is fed back to the model rather than ending the run.
+
 ## Where things live
 
 `%LOCALAPPDATA%\Obrew` on Windows, `~/Library/Application Support/Obrew` on macOS,
