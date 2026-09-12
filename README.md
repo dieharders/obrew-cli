@@ -1,10 +1,8 @@
-# obrew
+# Obrew CLI
 
-Local AI models as a headless agent CLI. `obrew` runs GGUF models on your machine through
+Local AI models as a headless agent CLI. `obrew-cli` runs GGUF models on your machine through
 [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`, gives the model a fenced set
-of tools plus any MCP servers you point it at, and streams what happens as JSON lines. It is
-shaped like `codex exec --json` so host apps (MotionBuff, BunView) can drive it as a provider next
-to Claude Code and Codex.
+of tools plus any MCP servers you point it at, and streams what happens as JSON lines.
 
 The Python [obrew-engine](https://github.com/dieharders/obrew-engine) is being ported here in
 phases. No Python, no webview, no REPL: one Bun binary.
