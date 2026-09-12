@@ -1,20 +1,25 @@
 /**
- * `obrew engine install|status|stop|log`
+ * `obrew engine install|status|start|stop|log`
  */
 import { join } from 'node:path'
-import { engineStatus, installEngine } from '../../engine/install'
+import { launchArgs, loadOptionsFrom } from '../../engine/flags'
+import { engineStatus, installEngine, requireEngine } from '../../engine/install'
 import { isAlive, listRunning, removeRunning } from '../../engine/running'
+import { acquireEngine, readShared, stopShared } from '../../engine/shared'
 import { LLAMACPP_TAG } from '../../engine/version'
-import { VARIANTS } from '../../shared/config'
+import { resolveModel } from '../../models/registry'
+import { DEFAULT_CTX_SIZE, loadConfig, VARIANTS } from '../../shared/config'
 import { UsageError } from '../../shared/errors'
 import { logsDir } from '../../shared/paths'
 import { track, untrack } from '../../shared/proc'
-import { oneOf, parse } from '../args'
+import { oneOf, parse, parseConfigPairs } from '../args'
 import { createOutput } from '../output'
+import { engineCommand } from './exec'
 
 const HELP = `obrew engine install [--variant cuda|cpu|vulkan|metal] [--tag bNNNN] [--json]
 obrew engine status [--json]
-obrew engine stop            stop every llama-server obrew started
+obrew engine start [--model <id>] [-c key=value ...]   start (or reuse) the warm shared engine
+obrew engine stop            stop the shared engine and every llama-server obrew started
 obrew engine log             print the llama-server log path and its tail`
 
 export async function runEngine(argv: string[]): Promise<number> {
@@ -23,6 +28,8 @@ export async function runEngine(argv: string[]): Promise<number> {
     help: { type: 'boolean', short: 'h', default: false },
     variant: { type: 'string' },
     tag: { type: 'string' },
+    model: { type: 'string' },
+    config: { type: 'string', multiple: true, short: 'c' },
   } as const)
   if (values.help) {
     console.log(HELP)
@@ -54,16 +61,43 @@ export async function runEngine(argv: string[]): Promise<number> {
     case 'status': {
       const status = await engineStatus()
       const running = (await listRunning()).filter((r) => isAlive(r.pid))
+      const shared = await readShared()
+      const sharedLive = shared && isAlive(shared.pid) ? shared : null
       if (values.json) {
-        console.log(JSON.stringify({ ...status, pinnedTag: LLAMACPP_TAG, running }))
+        console.log(JSON.stringify({ ...status, pinnedTag: LLAMACPP_TAG, running, shared: sharedLive }))
         return 0
       }
       console.log(status.installed ? `installed: ${status.tag} (${status.variant})\n  ${status.binary}` : `not installed (pinned tag ${LLAMACPP_TAG})`)
-      for (const r of running) console.log(`running: pid ${r.pid} port ${r.port} ${r.model}${r.shared ? ' (shared)' : ''}`)
+      if (sharedLive) {
+        const idle = Math.round((Date.now() - sharedLive.lastUsed) / 1000)
+        console.log(`shared: pid ${sharedLive.pid} port ${sharedLive.port} ${sharedLive.model} (idle ${idle} s)`)
+      }
+      for (const r of running) if (!sharedLive || r.pid !== sharedLive.pid) console.log(`running: pid ${r.pid} port ${r.port} ${r.model}`)
+      return 0
+    }
+    case 'start': {
+      const config = await loadConfig()
+      const model = await resolveModel(values.model)
+      const engine = await requireEngine(config)
+      const pairs = parseConfigPairs(values.config)
+      const loadOpts = loadOptionsFrom(pairs, {
+        ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
+        ...(model.mmprojPath ? { mmprojPath: model.mmprojPath } : {}),
+      })
+      const handle = await acquireEngine({
+        mode: 'shared',
+        command: engineCommand(engine.binary),
+        args: launchArgs(model.path, null, loadOpts),
+        model: model.id,
+        log: (m) => console.error(m),
+        onStatus: (state) => console.error(`[engine] ${state}`),
+      })
+      console.log(`${handle.started ? 'started' : 'reused'} shared engine on port ${handle.port} (${model.id})`)
       return 0
     }
     case 'stop': {
       let stopped = 0
+      if (await stopShared()) stopped++
       for (const r of await listRunning()) {
         if (isAlive(r.pid)) {
           try {

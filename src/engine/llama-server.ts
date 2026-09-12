@@ -10,9 +10,12 @@
  *    allocate", "unknown model architecture") instead of "not ready after 120 s".
  *  - cwd is the binary's directory, so the DLLs / dylibs beside it are found.
  *  - stop() terminates, waits briefly, then kills.
+ *
+ * This is the ATTACHED engine: it is our child and dies with `stop()` or with us. The warm
+ * shared engine, which must outlive us, is started by ./detach.ts instead.
  */
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { ObrewError } from '../shared/errors'
 import { readLines } from '../shared/ndjson'
@@ -39,7 +42,20 @@ export interface SpawnOptions {
   signal?: AbortSignal
   /** `loading` fires the first time /health answers 503. */
   onStatus?: (state: 'starting' | 'loading' | 'ready') => void
+  /** Where stderr lines go. `undefined` = the data dir's llama-server.log; `null` = nowhere. */
   logPath?: string | null
+}
+
+export const defaultLogPath = () => join(logsDir(), 'llama-server.log')
+
+/** The last lines of a log file, for a detached engine's diagnostics. */
+export async function logTail(path: string, lines = TAIL_LINES): Promise<string> {
+  try {
+    const text = await readFile(path, 'utf8')
+    return text.trimEnd().split('\n').slice(-lines).join('\n')
+  } catch {
+    return ''
+  }
 }
 
 export class LlamaServer {
@@ -80,7 +96,7 @@ export class LlamaServer {
     const argv = [bin, ...prefix, ...opts.args]
     const cwd = opts.cwd ?? (prefix.length === 0 ? dirname(bin) : process.cwd())
 
-    const logPath = opts.logPath === undefined ? join(logsDir(), 'llama-server.log') : opts.logPath
+    const logPath = opts.logPath === undefined ? defaultLogPath() : opts.logPath
     if (logPath) {
       await mkdir(dirname(logPath), { recursive: true })
       this.logStream = createWriteStream(logPath, { flags: 'a' })

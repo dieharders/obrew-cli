@@ -19,15 +19,14 @@ import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
 import { appendMessages, createSession, loadSession, newSessionId } from '../../agent/session'
 import { launchArgs, loadOptionsFrom } from '../../engine/flags'
 import { requireEngine } from '../../engine/install'
-import { LlamaServer } from '../../engine/llama-server'
-import { freePort } from '../../engine/ports'
+import { acquireEngine, reapIdleShared, type EngineHandle } from '../../engine/shared'
 import { reapOrphans } from '../../engine/running'
 import { resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
 import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
 import type { ExecEvent } from '../../shared/events'
 import { track, untrack } from '../../shared/proc'
-import { asInt, parse, parseConfigPairs } from '../args'
+import { asInt, oneOf, parse, parseConfigPairs } from '../args'
 import { createOutput } from '../output'
 
 const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
@@ -50,6 +49,9 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --stall-ms <n>             abort after this long with no output (default 120000)
   --wall-ms <n>              abort after this long in total (default 1800000)
   --include-tool-io          put tool inputs/outputs on the wire
+  --engine shared|ephemeral  shared (default) keeps llama-server warm across runs and reuses
+                             it when the model and flags match; ephemeral stops it on exit.
+                             OBREW_ENGINE sets the default.
 
   -c tool_mode=native|universal|none   native = the chat template's own (grammar-constrained)
                              tool calls; universal = two schema-constrained steps; default is
@@ -73,7 +75,10 @@ const OPTIONS = {
   'stall-ms': { type: 'string', default: '120000' },
   'wall-ms': { type: 'string', default: '1800000' },
   'include-tool-io': { type: 'boolean', default: false },
+  engine: { type: 'string' },
 } as const
+
+const ENGINE_MODES = ['shared', 'ephemeral'] as const
 
 /**
  * A script named by `OBREW_LLAMA_SERVER` runs under this same Bun (tests use a fake server
@@ -120,6 +125,7 @@ export async function runExec(argv: string[]): Promise<number> {
     : (values['system-prompt'] ?? DEFAULT_SYSTEM_PROMPT)
   const registry = builtinRegistry(values.tools)
   const mcpSpecs = (values['mcp-server'] ?? []).map(parseMcpServerSpec)
+  const engineMode = oneOf(values.engine ?? process.env.OBREW_ENGINE ?? 'shared', ENGINE_MODES, '--engine')
   const maxIterations = asInt(values['max-iterations'], '--max-iterations')
   const outputSchema = values['output-schema'] ? await loadOutputSchema(values['output-schema']) : undefined
   const grammar = values.grammar ? await loadGrammar(values.grammar) : undefined
@@ -148,12 +154,13 @@ export async function runExec(argv: string[]): Promise<number> {
   }
   const wallTimer = setTimeout(() => stop('timeout'), wallMs)
 
-  let server: LlamaServer | null = null
+  let handle: EngineHandle | null = null
   const mcpClients: McpClient[] = []
   const emit = (event: ExecEvent) => out.event(event)
 
   try {
     await reapOrphans(out.log)
+    if ((await reapIdleShared()) ) out.log('engine: stopped the idle shared llama-server')
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
@@ -175,31 +182,41 @@ export async function runExec(argv: string[]): Promise<number> {
     const sessionId = session?.header.id ?? newSessionId()
     if (!session) await createSession({ id: sessionId, createdAt: new Date().toISOString(), model: model.id, cwd })
 
-    const port = await freePort()
     const loadOpts = loadOptionsFrom(pairs, {
       ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
       ...(model.mmprojPath ? { mmprojPath: model.mmprojPath } : {}),
     })
     armStall()
-    server = await LlamaServer.start({
+    handle = await acquireEngine({
+      mode: engineMode,
       command: engineCommand(engine.binary),
-      args: launchArgs(model.path, port, loadOpts),
-      port,
+      args: launchArgs(model.path, null, loadOpts),
       model: model.id,
       signal: controller.signal,
+      log: out.log,
       onStatus: (state) => {
         armStall()
         emit({ type: 'engine.status', state })
       },
     })
-    emit({ type: 'session', sessionId, model: model.id, engine: { tag: engine.tag, variant: engine.variant, port } })
+    emit({ type: 'session', sessionId, model: model.id, engine: { tag: engine.tag, variant: engine.variant, port: handle.port } })
 
     const history = (session?.messages ?? []).filter((m) => m.role !== 'system')
     const userMessage: ChatMessage = { role: 'user', content: prompt }
     const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt }, ...history, userMessage]
     const toStore: ChatMessage[] = session ? [userMessage] : [messages[0]!, userMessage]
 
-    const client = server.client
+    const client = handle.client
+    const touch = handle.touch
+    let lastTouch = Date.now()
+    const onActivity = () => {
+      armStall()
+      // Keep the shared engine's idle clock moving during a long generation, cheaply.
+      if (Date.now() - lastTouch > 30_000) {
+        lastTouch = Date.now()
+        void touch()
+      }
+    }
     // Native tool calling needs a template that knows about tools; otherwise the universal
     // two-step, which constrains with an explicit schema and works with any template.
     let toolMode: ToolMode = 'none'
@@ -218,7 +235,7 @@ export async function runExec(argv: string[]): Promise<number> {
       maxIterations,
       signal: controller.signal,
       emit,
-      onActivity: armStall,
+      onActivity,
       includeToolIo: values['include-tool-io'],
       outputSchema,
       grammar,
@@ -246,7 +263,7 @@ export async function runExec(argv: string[]): Promise<number> {
           : err instanceof Error
             ? err.message
             : String(err)
-    if (server && (code === 'aborted' || code === 'timeout')) await server.client.eraseSlot()
+    if (handle && (code === 'aborted' || code === 'timeout')) await handle.client.eraseSlot()
     emit({ type: 'turn.failed', code, message })
     if (code === 'engine_missing' || code === 'model_missing') out.log(NOT_READY_HINT)
     if (err instanceof UsageError) throw err
@@ -256,7 +273,7 @@ export async function runExec(argv: string[]): Promise<number> {
     if (stallTimer) clearTimeout(stallTimer)
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
-    if (server) await server.stop()
+    if (handle) await handle.release()
     for (const client of mcpClients) await client.close().catch(() => {})
     untrack(controller)
   }

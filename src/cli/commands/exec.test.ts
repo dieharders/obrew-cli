@@ -18,7 +18,8 @@ const TIMEOUT_MS = 30_000
 
 async function run(args: string[], env: Record<string, string> = {}) {
   const proc = Bun.spawn([process.execPath, MAIN, ...args], {
-    env: { ...process.env, OBREW_LLAMA_SERVER: FAKE_SERVER, ...env },
+    // Ephemeral by default here: a shared fake engine would outlive the throwaway home.
+    env: { ...process.env, OBREW_LLAMA_SERVER: FAKE_SERVER, OBREW_ENGINE: 'ephemeral', ...env },
     stdin: 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -209,5 +210,46 @@ describe('obrew exec --json with an MCP server', () => {
     expect(code).toBe(1)
     expect(events.at(-1)).toMatchObject({ type: 'turn.failed', code: 'tool_error' })
     expect(events.some((e) => e.type === 'engine.status')).toBe(false)
+  }, TIMEOUT_MS)
+})
+
+describe('obrew exec --engine shared', () => {
+  let home: Awaited<ReturnType<typeof tempHome>>
+  beforeEach(async () => {
+    home = await tempHome()
+    const modelPath = join(home.dir, 'models', 'org--repo', 'm.gguf')
+    await mkdir(join(home.dir, 'models', 'org--repo'), { recursive: true })
+    await writeFile(modelPath, 'GGUF')
+    await saveRegistry({
+      version: 1,
+      default: 'org/repo:m.gguf',
+      models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: null, sizeBytes: 4, addedAt: '' }],
+    })
+  })
+  afterEach(async () => {
+    Bun.spawnSync([process.execPath, MAIN, 'engine', 'stop'], { env: process.env })
+    await home.cleanup()
+  })
+
+  test('the engine survives the first run and is reused by the second; engine stop ends it', async () => {
+    const first = await run(['exec', '--json', '--engine', 'shared', 'one'], { FAKE_REPLY: 'a' })
+    expect(first.code).toBe(0)
+    const port1 = (first.events.find((e) => e.type === 'session') as { engine: { port: number } }).engine.port
+    // Still up after obrew exited.
+    expect((await fetch(`http://127.0.0.1:${port1}/health`)).status).toBe(200)
+
+    const second = await run(['exec', '--json', '--engine', 'shared', 'two'], { FAKE_REPLY: 'b' })
+    expect(second.code).toBe(0)
+    const port2 = (second.events.find((e) => e.type === 'session') as { engine: { port: number } }).engine.port
+    expect(port2).toBe(port1)
+    expect(second.events.filter((e) => e.type === 'engine.status').map((e) => (e as { state: string }).state)).toEqual(['ready'])
+
+    const status = Bun.spawnSync([process.execPath, MAIN, 'engine', 'status', '--json'], { env: process.env })
+    expect((JSON.parse(status.stdout.toString()) as { shared: { port: number } }).shared.port).toBe(port1)
+
+    const stop = Bun.spawnSync([process.execPath, MAIN, 'engine', 'stop'], { env: process.env })
+    expect(stop.stdout.toString()).toContain('stopped 1')
+    await Bun.sleep(500)
+    await expect(fetch(`http://127.0.0.1:${port1}/health`)).rejects.toThrow()
   }, TIMEOUT_MS)
 })

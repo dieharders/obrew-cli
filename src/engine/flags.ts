@@ -25,8 +25,10 @@ export interface LoadOptions {
   extra?: string[]
 }
 
-export function launchArgs(modelPath: string, port: number, opts: LoadOptions = {}): string[] {
-  const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(port), '--jinja']
+export function launchArgs(modelPath: string, port: number | null, opts: LoadOptions = {}): string[] {
+  const args = ['-m', modelPath, '--host', '127.0.0.1']
+  if (port !== null) args.push('--port', String(port))
+  args.push('--jinja')
   args.push('--no-webui')
   // The /slots endpoint is what `POST /slots/0?action=erase` (cancel) needs.
   args.push('--slots')
