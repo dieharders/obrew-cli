@@ -190,14 +190,43 @@ describe('obrew exec --json with tools', () => {
     expect(stored.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'tool', 'assistant'])
   }, TIMEOUT_MS)
 
-  test('--output-schema puts parsed JSON on turn.completed', async () => {
-    const script = JSON.stringify([{ text: 'thinking about it' }, { text: '{"n": 7}' }])
+  test('--output-schema puts parsed JSON on turn.completed, in one constrained request', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    const script = JSON.stringify([{ text: '{"n": 7}' }])
     const { events, code } = await run(
       ['exec', '--json', '--tools', 'none', '--output-schema', '{"type":"object","properties":{"n":{"type":"integer"}}}', 'how many'],
-      { FAKE_SCRIPT: script },
+      { FAKE_SCRIPT: script, FAKE_LOG_REQUESTS: log },
     )
     expect(code).toBe(0)
-    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 7 } })
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 7 }, iterations: 1 })
+    const reqs = (await Bun.file(log).text()).trim().split('\n')
+    expect(reqs).toHaveLength(1)
+    expect(JSON.parse(reqs[0]!)).toMatchObject({ response_format: { type: 'json_schema' } })
+  }, TIMEOUT_MS)
+
+  test('--input-format json carries the output schema, past the argv size cap', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    // Well over the ~32 KB Windows puts on a whole command line.
+    const outputSchema = { type: 'object', properties: { n: { type: 'integer', description: 'x'.repeat(40_000) } }, required: ['n'] }
+    const { events, code } = await run(
+      ['exec', '--json', '--tools', 'none', '--input-format', 'json'],
+      { FAKE_SCRIPT: JSON.stringify([{ text: '{"n": 3}' }]), FAKE_LOG_REQUESTS: log },
+      JSON.stringify({ prompt: 'how many', outputSchema }),
+    )
+    expect(code).toBe(0)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 3 } })
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { response_format: { json_schema: { schema: unknown } } }
+    expect(req.response_format.json_schema.schema).toEqual(outputSchema)
+  }, TIMEOUT_MS)
+
+  test('an output schema on stdin and --output-schema together is a usage error', async () => {
+    const { code, stderr } = await run(
+      ['exec', '--json', '--input-format', 'json', '--output-schema', '{"type":"object"}'],
+      {},
+      JSON.stringify({ prompt: 'hi', outputSchema: { type: 'object' } }),
+    )
+    expect(code).toBe(2)
+    expect(stderr).toContain('cannot be combined')
   }, TIMEOUT_MS)
 
   test('--max-iterations exhaustion reports max_iterations on a completed turn (exit 0)', async () => {

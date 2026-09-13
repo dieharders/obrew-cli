@@ -82,6 +82,12 @@ export type ExecEventType = ExecEvent['type']
 export const ExecInputSchema = z.strictObject({
   prompt: z.string(),
   systemPrompt: z.string().optional(),
+  /**
+   * `--output-schema`, carried with the turn. Here for the same reason the prompt is: a host
+   * whose answer is a whole document has a schema to match (motionbuff's deck spec is ~42 KB
+   * of JSON Schema) that no Windows command line can hold.
+   */
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
 })
 
 export type ExecInput = z.infer<typeof ExecInputSchema>

@@ -36,9 +36,10 @@ Every run-time knob is also a `-c key=value` pair (`thinking`, `max_tokens`, `te
 flag set.
 
 A host driving `exec` should pass the turn's text on stdin rather than in argv: with
-`--input-format json`, `exec` reads one JSON object, `{"prompt": "...", "systemPrompt": "..."}`
-(`systemPrompt` optional), and then EOF. That keeps a long prompt clear of the ~32 KB Windows
-allows for a whole command line, and nothing has to be written to a temp file.
+`--input-format json`, `exec` reads one JSON object, `{"prompt": "...", "systemPrompt": "...",
+"outputSchema": {...}}` (`systemPrompt` and `outputSchema` optional), and then EOF. That keeps
+a long prompt, or a large schema, clear of the ~32 KB Windows allows for a whole command line,
+and nothing has to be written to a temp file.
 
 ## Tools are constrained, always
 
@@ -50,8 +51,10 @@ each decoded under a JSON schema. Either way the arguments are validated against
 schema before it runs, and an invalid call is repaired once under that schema. A failing tool
 is reported back to the model as a result; it never ends the run.
 
-`--output-schema '{...}'` (or `@file.json`) decodes the final answer under a schema and puts the
-parsed value on `turn.completed.output`; `--grammar @file.gbnf` does the same with GBNF.
+`--output-schema '{...}'` (or `@file.json`, or `outputSchema` on stdin) decodes the final answer
+under a schema and puts the parsed value on `turn.completed.output`; `--grammar @file.gbnf` does
+the same with GBNF. With tools available the model may use them first and only the answer is
+constrained; with `--tools none` the constrained request is the whole turn.
 
 ## MCP servers
 
@@ -67,6 +70,12 @@ run loads the model, later runs with the same model and flags reuse it, a differ
 replaces it, and an engine idle for ten minutes is stopped by the next run. `--engine ephemeral`
 (or `OBREW_ENGINE=ephemeral`) loads and unloads per run. `obrew engine status|start|stop`
 inspect and control it.
+
+On Windows the engine runs with no console window; its log is in the data directory, and
+`obrew engine log` prints the tail. To watch it live instead, pass `-c engine_console=true` to
+the `exec` or `engine start` that starts it: that engine gets a console window of its own
+(closing the window stops the engine). A warm engine keeps whatever it started with, so run
+`obrew engine stop` first to switch.
 
 `obrew serve --port 8008` fronts the same engine with an OpenAI-compatible API:
 `/v1/chat/completions`, `/v1/completions`, `/v1/models`, plus `/obrew/status`, `/obrew/models`

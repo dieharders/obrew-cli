@@ -181,6 +181,36 @@ describe('runAgent', () => {
     expect(reqs[2]!.tools).toBeUndefined()
   })
 
+  test('output schema with no tools: the constrained request is the whole turn', async () => {
+    const client = await start([{ text: '{"count":1}' }])
+    const events: ExecEvent[] = []
+    const result = await runAgent({
+      ...base(client, new ToolRegistry(), events),
+      toolMode: 'none',
+      outputSchema: { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'] },
+    })
+    expect(result.output).toEqual({ count: 1 })
+    expect(result.iterations).toBe(1)
+    expect(result.stopReason).toBe('stop')
+    // The constrained answer is the turn's streamed text, so a host reading deltas gets exactly it.
+    expect(events.filter((e) => e.type === 'delta').map((e) => (e as { text: string }).text).join('')).toBe('{"count":1}')
+    expect(result.produced.map((m) => m.role)).toEqual(['assistant'])
+    const reqs = await requests()
+    expect(reqs).toHaveLength(1)
+    expect(reqs[0]!.response_format).toMatchObject({ type: 'json_schema', json_schema: { schema: { required: ['count'] } } })
+    // Straight after the user's own message: no second user turn in a row.
+    expect((reqs[0]!.messages as Array<{ role: string }>).map((m) => m.role)).toEqual(['system', 'user'])
+  })
+
+  test('a grammar with no tools is one request too', async () => {
+    const client = await start([{ text: 'yes' }])
+    const result = await runAgent({ ...base(client, new ToolRegistry(), []), toolMode: 'none', grammar: 'root ::= "yes" | "no"' })
+    expect(result.finalText).toBe('yes')
+    const reqs = await requests()
+    expect(reqs).toHaveLength(1)
+    expect(reqs[0]!.grammar).toBe('root ::= "yes" | "no"')
+  })
+
   test('a slow tool hits the per-call timeout and is reported, not fatal', async () => {
     const slow: Tool = {
       name: 'Slow',

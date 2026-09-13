@@ -138,6 +138,8 @@ export interface AcquireOptions {
   logPath?: string | null
   /** Idle TTL to record on a shared engine (a host with long non-model phases raises it). */
   idleTtlMs?: number
+  /** Windows: give a shared engine started here a visible console window (`-c engine_console`). */
+  console?: boolean
 }
 
 /**
@@ -173,7 +175,7 @@ export async function acquireEngine(opts: AcquireOptions): Promise<EngineHandle>
     const argv = [bin, ...prefix, ...opts.args, '--port', String(port), ...(logPath ? ['--log-file', logPath] : [])]
     const cwd = prefix.length === 0 ? dirname(bin) : process.cwd()
     opts.onStatus?.('starting')
-    const pid = await spawnDetached(argv, { cwd, env: opts.env })
+    const pid = await spawnDetached(argv, { cwd, env: opts.env, console: opts.console })
     await recordRunning({ pid, port, ownerPid: process.pid, model: opts.model, startedAt: new Date().toISOString(), shared: true })
     const client = new EngineClient(`http://127.0.0.1:${port}`)
     const giveUp = async () => {

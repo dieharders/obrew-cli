@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { launchArgs, loadOptionsFrom } from './flags'
+import { engineConsoleFrom, launchArgs, loadOptionsFrom } from './flags'
 
 describe('launchArgs', () => {
   test('always enables jinja, binds loopback, offloads all layers by default', () => {
@@ -41,5 +41,27 @@ describe('loadOptionsFrom', () => {
 
   test('rejects a non-integer', () => {
     expect(() => loadOptionsFrom({ ctx_size: 'lots' })).toThrow(/integer/)
+  })
+
+  test('a boolean key takes 1 and 0, which -c parsing hands over as numbers', () => {
+    expect(loadOptionsFrom({ mmap: 0, mlock: 1 })).toEqual({ mmap: false, mlock: true })
+  })
+})
+
+describe('engineConsoleFrom', () => {
+  test('off unless asked for; true, on and 1 ask for it', () => {
+    expect(engineConsoleFrom({})).toBe(false)
+    expect(engineConsoleFrom({ engine_console: true })).toBe(true)
+    expect(engineConsoleFrom({ engine_console: 'on' })).toBe(true)
+    expect(engineConsoleFrom({ engine_console: 1 })).toBe(true)
+    expect(engineConsoleFrom({ engine_console: false })).toBe(false)
+  })
+
+  test('is not a launch option, so it never changes what makes two engines the same', () => {
+    expect(loadOptionsFrom({ engine_console: true })).toEqual({})
+  })
+
+  test('rejects anything else', () => {
+    expect(() => engineConsoleFrom({ engine_console: 'loud' })).toThrow(/engine_console expects true\|false/)
   })
 })

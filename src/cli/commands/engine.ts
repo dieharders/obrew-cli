@@ -2,7 +2,7 @@
  * `obrew engine install|status|start|stop|log`
  */
 import { join } from 'node:path'
-import { launchArgs, loadOptionsFrom } from '../../engine/flags'
+import { engineConsoleFrom, launchArgs, loadOptionsFrom } from '../../engine/flags'
 import { engineStatus, installEngine, requireEngine } from '../../engine/install'
 import { isAlive, listRunning, removeRunning } from '../../engine/running'
 import { acquireEngine, readShared, stopShared } from '../../engine/shared'
@@ -18,7 +18,8 @@ import { engineCommand } from './exec'
 
 const HELP = `obrew engine install [--variant cuda|cpu|vulkan|metal] [--tag bNNNN] [--json]
 obrew engine status [--json]
-obrew engine start [--model <id>] [-c key=value ...]   start (or reuse) the warm shared engine
+obrew engine start [--model <id>] [-c key=value ...]   start (or reuse) the warm shared engine;
+                             -c engine_console=true (Windows) shows its console window
 obrew engine stop            stop the shared engine and every llama-server obrew started
 obrew engine log             print the llama-server log path and its tail`
 
@@ -89,6 +90,7 @@ export async function runEngine(argv: string[]): Promise<number> {
         command: engineCommand(engine.binary),
         args: launchArgs(model.path, null, loadOpts),
         model: model.id,
+        console: engineConsoleFrom(pairs),
         log: (m) => console.error(m),
         onStatus: (state) => console.error(`[engine] ${state}`),
       })
