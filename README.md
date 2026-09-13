@@ -22,7 +22,8 @@ bun run dev exec resume <id> "again"   # continue a session
 ```
 obrew exec [resume <sessionId>] [--json] [--model <id>] [--effort low|medium|high]
            [-c key=value ...] [--cwd <dir>] [--system-prompt <t> | --system-prompt-file <p>]
-           [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none] "<prompt>"
+           [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none]
+           ("<prompt>" | --input-format json)
 obrew auth status [--json]
 obrew login [--model <repo[:file]>] [--json]
 obrew models list|pull <repo>[:file] [--mmproj]|rm <id>|use <id>
@@ -33,6 +34,11 @@ obrew sessions list|show <id>|rm <id>
 Every run-time knob is also a `-c key=value` pair (`thinking`, `max_tokens`, `temperature`,
 `ctx_size`, `n_gpu_layers`, `tool_mode`, ...), so `exec` and `exec resume` accept the identical
 flag set.
+
+A host driving `exec` should pass the turn's text on stdin rather than in argv: with
+`--input-format json`, `exec` reads one JSON object, `{"prompt": "...", "systemPrompt": "..."}`
+(`systemPrompt` optional), and then EOF. That keeps a long prompt clear of the ~32 KB Windows
+allows for a whole command line, and nothing has to be written to a temp file.
 
 ## Tools are constrained, always
 

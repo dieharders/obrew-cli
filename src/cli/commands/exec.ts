@@ -1,9 +1,11 @@
 /**
  * `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"`
  *
- * The provider entry point. A host spawns this once per turn with stdin ignored, reads
- * JSON lines from stdout, and stops it with a kill. Everything that can go wrong is reported
- * as a `turn.failed` event AND a non-zero exit, so a host may rely on either.
+ * The provider entry point. A host spawns this once per turn, reads JSON lines from stdout,
+ * and stops it with a kill. The turn's text comes from argv, or with `--input-format json`
+ * from one JSON object on stdin (`ExecInputSchema`), which is how a host passes a prompt
+ * too long for a command line. Everything that can go wrong is reported as a `turn.failed`
+ * event AND a non-zero exit, so a host may rely on either.
  */
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -25,7 +27,7 @@ import { reapOrphans } from '../../engine/running'
 import { resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
 import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
-import type { ExecEvent } from '../../shared/events'
+import { ExecInputSchema, type ExecEvent } from '../../shared/events'
 import { track, untrack } from '../../shared/proc'
 import { asInt, oneOf, parse, parseConfigPairs } from '../args'
 import { createOutput } from '../output'
@@ -41,6 +43,8 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --cwd <dir>                working directory for tools (default: current)
   --system-prompt <text>     system message; --system-prompt-file <path> reads it from a file
   --prompt-file <path>       read the prompt from a file ("-" as prompt reads stdin)
+  --input-format text|json   json: read {"prompt", "systemPrompt"?} from stdin as one JSON
+                             object, instead of the prompt argument and the flags above
   --tools <list|none>        built-in tools: Read,Grep,Glob (default), WebSearch, or none
   --image <path>             attach an image (png/jpg/gif/webp); needs a model pulled with
                              --mmproj. Repeatable.
@@ -71,6 +75,7 @@ const OPTIONS = {
   'system-prompt': { type: 'string' },
   'system-prompt-file': { type: 'string' },
   'prompt-file': { type: 'string' },
+  'input-format': { type: 'string', default: 'text' },
   tools: { type: 'string' },
   'mcp-server': { type: 'string', multiple: true },
   'max-iterations': { type: 'string', default: '25' },
@@ -84,6 +89,7 @@ const OPTIONS = {
 } as const
 
 const ENGINE_MODES = ['shared', 'ephemeral'] as const
+const INPUT_FORMATS = ['text', 'json'] as const
 
 /**
  * A script named by `OBREW_LLAMA_SERVER` runs under this same Bun (tests use a fake server
@@ -99,6 +105,35 @@ async function readPrompt(positionals: string[], promptFile: string | undefined)
   if (inline === '-') return (await Bun.stdin.text()).trim()
   if (!inline) throw new UsageError('a prompt is required (or --prompt-file)')
   return inline
+}
+
+/**
+ * `--input-format json`: the prompt and the system prompt from one JSON object on stdin.
+ * Stdin is the ONLY source in this mode, so an argv prompt or a prompt flag beside it is a
+ * usage error rather than a question of which one wins. `systemPrompt: null` means "not
+ * given", so the default applies, the same as omitting `--system-prompt`.
+ */
+async function readJsonInput(
+  positionals: string[],
+  flags: { 'prompt-file'?: string; 'system-prompt'?: string; 'system-prompt-file'?: string },
+): Promise<{ prompt: string; systemPrompt: string | null }> {
+  if (positionals.length > 0 || flags['prompt-file'] || flags['system-prompt'] !== undefined || flags['system-prompt-file']) {
+    throw new UsageError('--input-format json reads the prompt and system prompt from stdin; drop the prompt argument and the prompt flags')
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(await Bun.stdin.text())
+  } catch {
+    throw new UsageError('--input-format json: stdin is not a JSON object')
+  }
+  const parsed = ExecInputSchema.safeParse(raw)
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ')
+    throw new UsageError(`--input-format json: ${issues}`)
+  }
+  const prompt = parsed.data.prompt.trim()
+  if (!prompt) throw new UsageError('a prompt is required')
+  return { prompt, systemPrompt: parsed.data.systemPrompt ?? null }
 }
 
 export async function runExec(argv: string[]): Promise<number> {
@@ -118,16 +153,24 @@ export async function runExec(argv: string[]): Promise<number> {
     rest = rest.slice(2)
   }
 
-  const prompt = await readPrompt(rest, values['prompt-file'])
+  const inputFormat = oneOf(values['input-format'], INPUT_FORMATS, '--input-format')
+  const input =
+    inputFormat === 'json'
+      ? await readJsonInput(rest, values)
+      : {
+          prompt: await readPrompt(rest, values['prompt-file']),
+          systemPrompt: values['system-prompt-file']
+            ? await readFile(values['system-prompt-file'], 'utf8')
+            : (values['system-prompt'] ?? null),
+        }
+  const prompt = input.prompt
   const effort = parseEffort(values.effort)
   const pairs = parseConfigPairs(values.config)
   const gen = generationFor(effort, pairs)
   const cwd = resolve(values.cwd ?? process.cwd())
   const stallMs = asInt(values['stall-ms'], '--stall-ms')
   const wallMs = asInt(values['wall-ms'], '--wall-ms')
-  const systemPrompt = values['system-prompt-file']
-    ? await readFile(values['system-prompt-file'], 'utf8')
-    : (values['system-prompt'] ?? DEFAULT_SYSTEM_PROMPT)
+  const systemPrompt = input.systemPrompt ?? DEFAULT_SYSTEM_PROMPT
   const registry = builtinRegistry(values.tools)
   const mcpSpecs = (values['mcp-server'] ?? []).map(parseMcpServerSpec)
   const engineMode = oneOf(values.engine ?? process.env.OBREW_ENGINE ?? 'shared', ENGINE_MODES, '--engine')

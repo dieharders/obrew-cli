@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FAKE_SERVER, tempHome } from '../../../test/fixtures/home'
+import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
 import { saveRegistry } from '../../models/registry'
 import type { ExecEvent } from '../../shared/events'
 import { ExecEventSchema } from '../../shared/events'
@@ -16,11 +17,11 @@ const MAIN = join(import.meta.dir, '..', '..', 'main.ts')
 /** Each run spawns obrew, which spawns the fake engine: allow well over the 5 s default. */
 const TIMEOUT_MS = 30_000
 
-async function run(args: string[], env: Record<string, string> = {}) {
+async function run(args: string[], env: Record<string, string> = {}, stdin?: string) {
   const proc = Bun.spawn([process.execPath, MAIN, ...args], {
     // Ephemeral by default here: a shared fake engine would outlive the throwaway home.
     env: { ...process.env, OBREW_LLAMA_SERVER: FAKE_SERVER, OBREW_ENGINE: 'ephemeral', ...env },
-    stdin: 'ignore',
+    stdin: stdin === undefined ? 'ignore' : new Blob([stdin]),
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -103,6 +104,44 @@ describe('obrew exec --json', () => {
     const { stdout, code } = await run(['exec', 'hi'], { FAKE_REPLY: 'plain text' })
     expect(code).toBe(0)
     expect(stdout).toContain('plain text')
+  }, TIMEOUT_MS)
+
+  test('--input-format json: prompt and system prompt from stdin, past the argv size cap', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    // Well over the ~32 KB Windows puts on a whole command line.
+    const prompt = `build slide 3 ${'x'.repeat(100_000)}`
+    const { code } = await run(
+      ['exec', '--json', '--tools', 'none', '--input-format', 'json'],
+      { FAKE_LOG_REQUESTS: log, FAKE_REPLY: 'ok' },
+      JSON.stringify({ prompt, systemPrompt: 'house rules' }),
+    )
+    expect(code).toBe(0)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages[0]).toEqual({ role: 'system', content: 'house rules' })
+    expect(JSON.stringify(req.messages.find((m) => m.role === 'user')!.content)).toContain(prompt)
+  }, TIMEOUT_MS)
+
+  test('--input-format json without a systemPrompt uses the default', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    const { code } = await run(['exec', '--json', '--tools', 'none', '--input-format', 'json'], { FAKE_LOG_REQUESTS: log, FAKE_REPLY: 'ok' }, JSON.stringify({ prompt: 'hi' }))
+    expect(code).toBe(0)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages[0]).toEqual({ role: 'system', content: DEFAULT_SYSTEM_PROMPT })
+  }, TIMEOUT_MS)
+
+  test('--input-format json refuses a second prompt source, bad JSON and unknown fields', async () => {
+    const withArg = await run(['exec', '--json', '--input-format', 'json', 'hi'], {}, JSON.stringify({ prompt: 'hi' }))
+    expect(withArg.code).toBe(2)
+    expect(withArg.stderr).toContain('reads the prompt and system prompt from stdin')
+    const withFlag = await run(['exec', '--json', '--input-format', 'json', '--system-prompt', 'x'], {}, JSON.stringify({ prompt: 'hi' }))
+    expect(withFlag.code).toBe(2)
+    const garbage = await run(['exec', '--json', '--input-format', 'json'], {}, 'not json')
+    expect(garbage.code).toBe(2)
+    expect(garbage.stderr).toContain('stdin is not a JSON object')
+    const typo = await run(['exec', '--json', '--input-format', 'json'], {}, JSON.stringify({ prompt: 'hi', system: 'x' }))
+    expect(typo.code).toBe(2)
+    const nothing = await run(['exec', '--json', '--input-format', 'json'])
+    expect(nothing.code).toBe(2)
   }, TIMEOUT_MS)
 
   test('auth status reflects the fake setup', async () => {

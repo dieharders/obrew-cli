@@ -72,3 +72,16 @@ export const ExecEventSchema = z.discriminatedUnion('type', [
 
 export type ExecEvent = z.infer<typeof ExecEventSchema>
 export type ExecEventType = ExecEvent['type']
+
+/**
+ * The other direction: what a host writes on stdin under `exec --input-format json`, one
+ * object and then EOF. It is how a host keeps the turn's text off the command line, which
+ * Windows caps at ~32 KB, without writing it to a file somewhere first. Strict, so a
+ * misspelled field is a usage error rather than a prompt that silently went missing.
+ */
+export const ExecInputSchema = z.strictObject({
+  prompt: z.string(),
+  systemPrompt: z.string().optional(),
+})
+
+export type ExecInput = z.infer<typeof ExecInputSchema>
