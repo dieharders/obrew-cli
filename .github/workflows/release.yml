@@ -5,8 +5,10 @@
 # the tag picker, and the `tag` box below only exists to override it.
 #
 # Asset names are the contract with hosts that install obrew for the user: MotionBuff's
-# managed installer fetches `obrew-<target>[.exe]` from the latest release and verifies the
-# `digest` GitHub records for every asset. Rename an asset here and that installer breaks.
+# managed installer fetches `obrew-<target>[.exe]` from the release tagged `v<OBREW_VERSION>`
+# (pinned in its install/index.ts) and verifies the `digest` GitHub records for every asset.
+# Rename an asset here and that installer breaks. The tag must match package.json's version:
+# MotionBuff also refuses to run an obrew whose `--version` is older than the one it pins.
 name: Release
 
 on:
