@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { writeFile } from 'node:fs/promises'
+import { rm, writeFile } from 'node:fs/promises'
 import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
 import { runLogin } from '../cli/commands/login'
 import { DEFAULT_LOGIN_MODEL } from '../shared/config'
@@ -137,17 +137,36 @@ describe('pullModel', () => {
       }
     }
 
-    test('installs the built-in default even when another model is installed and chosen', async () => {
-      const other = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
-      await setDefault(other.id)
+    test('a fresh install gets the built-in default, set as the default', async () => {
       expect(await login()).toBe(0)
       const registry = await loadRegistry()
       expect(registry.default).toBe(DEFAULT_LOGIN_MODEL)
-      expect(registry.models.map((m) => m.id)).toEqual([other.id, DEFAULT_LOGIN_MODEL])
-      expect(await resolveModel(undefined)).toMatchObject({ id: DEFAULT_LOGIN_MODEL })
+      expect(registry.models.map((m) => m.id)).toEqual([DEFAULT_LOGIN_MODEL])
     })
 
-    test('downloads nothing when the built-in default is already on disk', async () => {
+    test('a chosen default is respected: login leaves it alone and never installs the built-in one', async () => {
+      const chosen = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(chosen.id)
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual([])
+      const registry = await loadRegistry()
+      expect(registry.default).toBe(chosen.id)
+      expect(registry.models.map((m) => m.id)).toEqual([chosen.id])
+    })
+
+    test('a chosen default that is missing is downloaded again, not swapped for the built-in one', async () => {
+      const chosen = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(chosen.id)
+      await rm(chosen.path)
+      expect(await login()).toBe(0)
+      expect(Bun.file(chosen.path).size).toBe(chosen.sizeBytes)
+      const registry = await loadRegistry()
+      expect(registry.default).toBe(chosen.id)
+      expect(registry.models.map((m) => m.id)).toEqual([chosen.id])
+    })
+
+    test('downloads nothing when the default is already on disk', async () => {
       expect(await login()).toBe(0)
       requests = []
       expect(await login()).toBe(0)

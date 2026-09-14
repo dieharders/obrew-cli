@@ -26,10 +26,11 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>
 
 /**
- * The built-in default chat model, and the one model `obrew login` installs out of the box.
- * Login downloads it whenever this machine does not have it, and makes it the default. It is
- * also the default whenever none has been chosen (`obrew models use <id>` chooses one), so
- * there is always a default, and it never depends on which model happened to be pulled first.
+ * The built-in default chat model: the out-of-the-box default, and what `obrew login` installs
+ * on a fresh machine. It is the default whenever none has been chosen; once the user or a host
+ * chooses another (`obrew models use <id>`), login installs that one instead and never
+ * reinstates this. There is always a default, and it never depends on which model happened to
+ * be pulled first.
  *
  * Gemma 4 E2B at Q8_0 (~5 GB). On the same deck builds it finished in either tool mode with
  * the better content; Qwen3.5-2B finished only under `universal` and overran its time budget.
