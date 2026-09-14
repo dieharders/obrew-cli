@@ -78,11 +78,19 @@ export async function universalSelect(opts: UniversalOptions): Promise<ToolCall 
   const tool = choice?.tool ? opts.registry.get(choice.tool) : undefined
   if (!tool) return null
 
+  // The fill step sees the whole transcript, so a failed earlier call of this same tool is
+  // right there above it — but a small model re-fills identical arguments unless told the
+  // result is something to act on. Said every time rather than only after a failure: the loop
+  // does not know here whether the last result was an error, and the sentence costs nothing when
+  // there was none.
   const fillMessages: ChatMessage[] = [
     ...opts.messages,
     {
       role: 'user',
-      content: `Call the tool "${tool.name}". ${tool.description}\n\nReply with the JSON arguments only.`,
+      content:
+        `Call the tool "${tool.name}". ${tool.description}\n\n` +
+        `If an earlier call of this tool above reported a problem with its arguments, change them to fix ` +
+        `exactly what it reported; never repeat arguments that already failed.\n\nReply with the JSON arguments only.`,
     },
   ]
   const args = await constrainedJson(opts, fillMessages, tool.inputSchema)

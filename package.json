@@ -9,7 +9,7 @@
   "bin": {
     "obrew": "./src/main.ts"
   },
-  "llamacpp_tag": "b9080",
+  "llamacpp_tag": "b10937",
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

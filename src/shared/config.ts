@@ -27,8 +27,15 @@ export const ConfigSchema = z.object({
 })
 export type Config = z.infer<typeof ConfigSchema>
 
-/** A small instruct model with a tools-aware chat template; the owner may change it. */
-export const DEFAULT_LOGIN_MODEL = 'unsloth/Qwen3-4B-GGUF:Qwen3-4B-Q4_K_M.gguf'
+/**
+ * A small instruct model with a tools-aware chat template; the owner may change it.
+ *
+ * Qwen3-1.7B at Q8_0 (~1.8 GB). The 0.6B could fill a plan but not drive a build: it lost
+ * count of slides under a long schema and re-issued the same tool call until the loop cut it
+ * off. 8-bit rather than Q4 because at this size the quantisation error is a real share of
+ * the model, and the extra ~0.7 GB is cheap next to a tool call that comes out wrong.
+ */
+export const DEFAULT_LOGIN_MODEL = 'unsloth/Qwen3-1.7B-GGUF:Qwen3-1.7B-Q8_0.gguf'
 export const DEFAULT_CTX_SIZE = 16384
 
 export async function loadConfig(): Promise<Config> {
