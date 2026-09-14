@@ -4,6 +4,8 @@ dist/
 # Compiled binaries (build.ts writes these to the repo root for the host target)
 obrew
 obrew.exe
+obrew.map
+obrew.exe.map
 *.js.map
 
 # Local data when OBREW_HOME points inside the repo during development

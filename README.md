@@ -79,8 +79,9 @@ the `exec` or `engine start` that starts it: that engine gets a console window o
 
 `obrew serve --port 8008` fronts the same engine with an OpenAI-compatible API:
 `/v1/chat/completions`, `/v1/completions`, `/v1/models`, plus `/obrew/status`, `/obrew/models`
-and `POST /obrew/models/pull` (SSE progress). The `model` field picks the model and swaps the
-engine when it differs.
+and `POST /obrew/models/pull` (SSE progress), which installs a model the way `obrew models pull`
+does and leaves the default alone. The `model` field picks the model and swaps the engine when
+it differs.
 
 ## Vision, search, embeddings
 

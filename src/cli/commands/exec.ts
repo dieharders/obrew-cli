@@ -36,7 +36,7 @@ import { createOutput } from '../output'
 const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
 
   --json                     one JSON event per line on stdout
-  --model <id>               installed model id (default: the registry default)
+  --model <id>               installed model id (default: \`obrew models use\`'s, else built-in)
   --effort low|medium|high   thinking on/off and answer length (default: low)
   -c key=value               run knob; repeatable. thinking, max_tokens, temperature,
                              tool_temperature (tool choice/arguments; default 0.1), top_p,

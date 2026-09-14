@@ -5,7 +5,8 @@
  * `/v1/completions` are proxied through with the body untouched apart from `model`, which
  * selects (and if necessary swaps) the loaded model. `/v1/models` lists the registry.
  * `/v1/embeddings` waits for the embeddings phase. The `/obrew/*` routes expose what the CLI
- * can do — status, models, pulls with SSE progress — for a host that would rather talk HTTP.
+ * can do — status, models, pulls with SSE progress — for a host that would rather talk HTTP,
+ * as Ollama's API does. A pull here is `obrew models pull`: it never changes the default.
  *
  * Loopback by default; there is no auth, on the same reasoning as the MCP endpoints obrew
  * dials: the reachable set is this machine's processes.
@@ -15,7 +16,7 @@ import { engineStatus, requireEngine } from '../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../engine/shared'
 import { EmbeddingEngine } from '../embed/engine'
 import { pullModel } from '../models/pull'
-import { loadRegistry, removeModel, resolveModel, type ModelEntry } from '../models/registry'
+import { defaultModelId, loadRegistry, removeModel, resolveModel, type ModelEntry } from '../models/registry'
 import { DEFAULT_CTX_SIZE, hfToken, loadConfig } from '../shared/config'
 import { ObrewError } from '../shared/errors'
 import type { ExecEvent } from '../shared/events'
@@ -222,7 +223,7 @@ export class ObrewServer {
         engine: status,
         loaded: this.loaded?.id ?? null,
         port: this.engine?.port ?? null,
-        default: registry.default,
+        default: defaultModelId(registry),
       })
     }
     if (path === '/obrew/models' && req.method === 'GET') return json(await loadRegistry())
