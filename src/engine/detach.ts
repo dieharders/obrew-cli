@@ -13,6 +13,15 @@
  * Neither path inherits our stdio, so the engine writes its log to a FILE (`--log-file`, a
  * llama-server flag) rather than to a pipe we would have to keep open. Readiness is judged
  * by `/health` plus a pid-liveness check; a crash reports the tail of that file.
+ *
+ * On Windows the engine is also created with NO CONSOLE (`DETACHED_PROCESS`). The WMI
+ * provider host has no console to share, so without the flag Windows gives llama-server a
+ * new console window of its own: a window on the user's desktop scrolling the engine's log
+ * (with Windows Terminal as the default terminal, a whole terminal window), in front of
+ * whatever app started the turn, and closing it kills the engine. The log file already has
+ * everything that window showed; `obrew engine log` prints its tail. The window is still
+ * available on request (`console`, from `-c engine_console=true`) for watching the engine
+ * work; POSIX has no equivalent and ignores it.
  */
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -23,6 +32,10 @@ import { isAlive } from './running'
 
 const READY_TIMEOUT_MS = 120_000
 const POLL_MS = 500
+/** Win32 `DETACHED_PROCESS`: the new process gets no console at all. See the header. */
+const DETACHED_PROCESS = 0x8
+/** Win32 `CREATE_NEW_CONSOLE`: a console window of its own, when one is asked for. */
+const CREATE_NEW_CONSOLE = 0x10
 
 /** Quote for a Windows CommandLine: wrap in double quotes, escape inner double quotes. */
 const winQuote = (arg: string) => `"${arg.replace(/(\\*)"/g, '$1$1\\"')}"`
@@ -30,14 +43,18 @@ const winQuote = (arg: string) => `"${arg.replace(/(\\*)"/g, '$1$1\\"')}"`
 export interface DetachOptions {
   cwd: string
   env?: Record<string, string | undefined>
+  /** Windows: a visible console window instead of none. See the header. */
+  console?: boolean
 }
 
 export async function spawnDetached(argv: string[], opts: DetachOptions): Promise<number> {
   if (process.platform === 'win32') {
     const commandLine = argv.map(winQuote).join(' ')
+    const createFlags = opts.console ? CREATE_NEW_CONSOLE : DETACHED_PROCESS
     const script =
+      `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ CreateFlags = [uint32]${createFlags} }; ` +
       `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ ` +
-      `CommandLine = '${commandLine.replace(/'/g, "''")}'; CurrentDirectory = '${opts.cwd.replace(/'/g, "''")}' }; ` +
+      `CommandLine = '${commandLine.replace(/'/g, "''")}'; CurrentDirectory = '${opts.cwd.replace(/'/g, "''")}'; ProcessStartupInformation = $si }; ` +
       `if ($r.ReturnValue -ne 0) { Write-Error ("Win32_Process.Create failed: " + $r.ReturnValue); exit 1 }; Write-Output $r.ProcessId`
     const proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       stdin: 'ignore',

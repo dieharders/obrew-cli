@@ -85,6 +85,41 @@ describe('obrew serve', () => {
     expect((await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: 'x' })).status).toBe(400)
   })
 
+  test('/obrew/models/pull installs a model with SSE progress and leaves the default alone', async () => {
+    // A one-file fake Hub, just enough for a pull.
+    const bytes = new Uint8Array(2000).fill(5)
+    const sha256 = new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
+    const hub = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(req) {
+        const { pathname } = new URL(req.url)
+        if (pathname === '/api/models/o/r/tree/main') {
+          return Response.json([{ type: 'file', path: 'c.gguf', size: bytes.length, lfs: { oid: sha256, size: bytes.length } }])
+        }
+        if (pathname === '/o/r/resolve/main/c.gguf') return new Response(bytes, { headers: { 'content-length': String(bytes.length) } })
+        return new Response('nf', { status: 404 })
+      },
+    })
+    process.env.HF_ENDPOINT = `http://127.0.0.1:${hub.port}`
+    try {
+      const pull = (body: unknown) =>
+        fetch(`${base}/obrew/models/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      expect((await pull({})).status).toBe(400)
+      const res = await pull({ spec: 'o/r:c.gguf' })
+      expect(res.headers.get('content-type')).toContain('text/event-stream')
+      const text = await res.text()
+      expect(text).toContain('"type":"download.done"')
+      expect(text).toContain('"ok":true')
+      const registry = (await (await fetch(`${base}/obrew/models`)).json()) as { default: string; models: Array<{ id: string }> }
+      expect(registry.models.map((m) => m.id)).toEqual(['o/r:a.gguf', 'o/r:b.gguf', 'o/r:c.gguf'])
+      expect(registry.default).toBe('o/r:a.gguf')
+    } finally {
+      hub.stop(true)
+      delete process.env.HF_ENDPOINT
+    }
+  })
+
   test('/v1/embeddings answers in the OpenAI shape once an embedding model is set', async () => {
     const none = await fetch(`${base}/v1/embeddings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'x' }) })
     expect(none.status).toBe(404)

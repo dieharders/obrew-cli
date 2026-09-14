@@ -2,8 +2,8 @@
  * `obrew models list|pull|rm|use`
  */
 import { pullModel } from '../../models/pull'
-import { findModel, loadRegistry, removeModel, setDefault } from '../../models/registry'
-import { hfToken, loadConfig, saveConfig } from '../../shared/config'
+import { defaultModelId, findModel, loadRegistry, removeModel, setDefault } from '../../models/registry'
+import { DEFAULT_LOGIN_MODEL, hfToken, loadConfig, saveConfig } from '../../shared/config'
 import { humanBytes } from '../../shared/download'
 import { ObrewError, UsageError } from '../../shared/errors'
 import { track, untrack } from '../../shared/proc'
@@ -38,11 +38,11 @@ export async function runModels(argv: string[]): Promise<number> {
         return 0
       }
       if (registry.models.length === 0) {
-        console.log('no models installed; try `obrew models pull unsloth/Qwen3-4B-GGUF`')
+        console.log(`no models installed; run \`obrew login\` to install the default (${DEFAULT_LOGIN_MODEL})`)
         return 0
       }
       for (const m of registry.models) {
-        const mark = m.id === registry.default ? '*' : ' '
+        const mark = m.id === defaultModelId(registry) ? '*' : ' '
         console.log(`${mark} ${m.id}  ${humanBytes(m.sizeBytes)}${m.mmprojPath ? '  +mmproj' : ''}`)
       }
       return 0

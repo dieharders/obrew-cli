@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { downloadVerified } from '../shared/download'
 import { modelsDir } from '../shared/paths'
 import { authHeaders, chooseGguf, chooseMmproj, listRepoFiles, modelId, parseModelSpec, resolveUrl, type HfFile } from './hf'
-import { addModel, loadRegistry, findModel, type ModelEntry } from './registry'
+import { addModel, loadRegistry, findModel, isOnDisk, type ModelEntry } from './registry'
 
 export interface PullOptions {
   /** `org/repo[:file]` */
@@ -48,10 +48,11 @@ async function fetchFile(repoId: string, file: HfFile, opts: PullOptions): Promi
 export async function pullModel(opts: PullOptions): Promise<ModelEntry> {
   const { repoId, file } = parseModelSpec(opts.spec)
 
-  // Already installed under that exact id: nothing to fetch (mmproj may still be added).
+  // Already on disk under that exact id: nothing to fetch (mmproj may still be added). A file
+  // that is missing or of another size is not that model, and is fetched again.
   const registry = await loadRegistry()
   const existing = file ? findModel(registry, modelId(repoId, file)) : null
-  if (existing && !opts.mmproj && (await Bun.file(existing.path).exists())) {
+  if (existing && !opts.mmproj && (await isOnDisk(existing))) {
     opts.onLog?.(`${existing.id} is already installed`)
     return existing
   }

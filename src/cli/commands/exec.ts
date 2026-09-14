@@ -1,15 +1,18 @@
 /**
  * `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"`
  *
- * The provider entry point. A host spawns this once per turn with stdin ignored, reads
- * JSON lines from stdout, and stops it with a kill. Everything that can go wrong is reported
- * as a `turn.failed` event AND a non-zero exit, so a host may rely on either.
+ * The provider entry point. A host spawns this once per turn, reads JSON lines from stdout,
+ * and stops it with a kill. The turn's text comes from argv, or with `--input-format json`
+ * from one JSON object on stdin (`ExecInputSchema`), which is how a host passes a prompt
+ * (or an output schema) too long for a command line. Everything that can go wrong is reported as a `turn.failed`
+ * event AND a non-zero exit, so a host may rely on either.
  */
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { loadGrammar, loadOutputSchema, templateSupportsTools } from '../../agent/constrain'
 import { runAgent, type ToolMode } from '../../agent/loop'
 import { builtinRegistry } from '../../agent/tools/registry'
+import type { JsonSchema } from '../../agent/tools/types'
 import { McpClient } from '../../mcp/client'
 import { parseMcpServerSpec } from '../../mcp/spec'
 import { McpError } from '../../mcp/types'
@@ -18,14 +21,14 @@ import type { ChatMessage } from '../../agent/messages'
 import { imagePart, transcriptContent, userContent } from '../../agent/images'
 import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
 import { appendMessages, createSession, loadSession, newSessionId } from '../../agent/session'
-import { launchArgs, loadOptionsFrom } from '../../engine/flags'
+import { engineConsoleFrom, launchArgs, loadOptionsFrom } from '../../engine/flags'
 import { requireEngine } from '../../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../../engine/shared'
 import { reapOrphans } from '../../engine/running'
 import { resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
 import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
-import type { ExecEvent } from '../../shared/events'
+import { ExecInputSchema, type ExecEvent } from '../../shared/events'
 import { track, untrack } from '../../shared/proc'
 import { asInt, oneOf, parse, parseConfigPairs } from '../args'
 import { createOutput } from '../output'
@@ -33,14 +36,18 @@ import { createOutput } from '../output'
 const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
 
   --json                     one JSON event per line on stdout
-  --model <id>               installed model id (default: the registry default)
+  --model <id>               installed model id (default: \`obrew models use\`'s, else built-in)
   --effort low|medium|high   thinking on/off and answer length (default: low)
-  -c key=value               run knob; repeatable. thinking, max_tokens, temperature, top_p,
+  -c key=value               run knob; repeatable. thinking, max_tokens, temperature,
+                             tool_temperature (tool choice/arguments; default 0.1), top_p,
                              top_k, min_p, seed, stop, ctx_size, n_gpu_layers, threads,
                              batch_size, cache_type_k, cache_type_v, mmap, mlock
   --cwd <dir>                working directory for tools (default: current)
   --system-prompt <text>     system message; --system-prompt-file <path> reads it from a file
   --prompt-file <path>       read the prompt from a file ("-" as prompt reads stdin)
+  --input-format text|json   json: read {"prompt", "systemPrompt"?, "outputSchema"?} from stdin
+                             as one JSON object, instead of the prompt argument and the flags
+                             above; "outputSchema" is --output-schema with no argv size limit
   --tools <list|none>        built-in tools: Read,Grep,Glob (default), WebSearch, or none
   --image <path>             attach an image (png/jpg/gif/webp); needs a model pulled with
                              --mmproj. Repeatable.
@@ -56,6 +63,8 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
                              it when the model and flags match; ephemeral stops it on exit.
                              OBREW_ENGINE sets the default. -c engine_idle_ms=N sets how long
                              the shared engine may idle before a later run stops it.
+                             -c engine_console=true (Windows) gives a shared engine this run
+                             starts a visible console window showing its log.
 
   -c tool_mode=native|universal|none   native = the chat template's own (grammar-constrained)
                              tool calls; universal = two schema-constrained steps; default is
@@ -71,6 +80,7 @@ const OPTIONS = {
   'system-prompt': { type: 'string' },
   'system-prompt-file': { type: 'string' },
   'prompt-file': { type: 'string' },
+  'input-format': { type: 'string', default: 'text' },
   tools: { type: 'string' },
   'mcp-server': { type: 'string', multiple: true },
   'max-iterations': { type: 'string', default: '25' },
@@ -84,6 +94,7 @@ const OPTIONS = {
 } as const
 
 const ENGINE_MODES = ['shared', 'ephemeral'] as const
+const INPUT_FORMATS = ['text', 'json'] as const
 
 /**
  * A script named by `OBREW_LLAMA_SERVER` runs under this same Bun (tests use a fake server
@@ -99,6 +110,39 @@ async function readPrompt(positionals: string[], promptFile: string | undefined)
   if (inline === '-') return (await Bun.stdin.text()).trim()
   if (!inline) throw new UsageError('a prompt is required (or --prompt-file)')
   return inline
+}
+
+/**
+ * `--input-format json`: the prompt and the system prompt from one JSON object on stdin.
+ * Stdin is the ONLY source in this mode, so an argv prompt or a prompt flag beside it is a
+ * usage error rather than a question of which one wins. `systemPrompt: null` means "not
+ * given", so the default applies, the same as omitting `--system-prompt`. An output schema
+ * may come from either place, but not from both, for the same reason.
+ */
+async function readJsonInput(
+  positionals: string[],
+  flags: { 'prompt-file'?: string; 'system-prompt'?: string; 'system-prompt-file'?: string; 'output-schema'?: string },
+): Promise<{ prompt: string; systemPrompt: string | null; outputSchema?: JsonSchema }> {
+  if (positionals.length > 0 || flags['prompt-file'] || flags['system-prompt'] !== undefined || flags['system-prompt-file']) {
+    throw new UsageError('--input-format json reads the prompt and system prompt from stdin; drop the prompt argument and the prompt flags')
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(await Bun.stdin.text())
+  } catch {
+    throw new UsageError('--input-format json: stdin is not a JSON object')
+  }
+  const parsed = ExecInputSchema.safeParse(raw)
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ')
+    throw new UsageError(`--input-format json: ${issues}`)
+  }
+  const prompt = parsed.data.prompt.trim()
+  if (!prompt) throw new UsageError('a prompt is required')
+  if (parsed.data.outputSchema && flags['output-schema'] !== undefined) {
+    throw new UsageError('--input-format json: "outputSchema" on stdin and --output-schema cannot be combined')
+  }
+  return { prompt, systemPrompt: parsed.data.systemPrompt ?? null, outputSchema: parsed.data.outputSchema }
 }
 
 export async function runExec(argv: string[]): Promise<number> {
@@ -118,21 +162,29 @@ export async function runExec(argv: string[]): Promise<number> {
     rest = rest.slice(2)
   }
 
-  const prompt = await readPrompt(rest, values['prompt-file'])
+  const inputFormat = oneOf(values['input-format'], INPUT_FORMATS, '--input-format')
+  const input: { prompt: string; systemPrompt: string | null; outputSchema?: JsonSchema } =
+    inputFormat === 'json'
+      ? await readJsonInput(rest, values)
+      : {
+          prompt: await readPrompt(rest, values['prompt-file']),
+          systemPrompt: values['system-prompt-file']
+            ? await readFile(values['system-prompt-file'], 'utf8')
+            : (values['system-prompt'] ?? null),
+        }
+  const prompt = input.prompt
   const effort = parseEffort(values.effort)
   const pairs = parseConfigPairs(values.config)
   const gen = generationFor(effort, pairs)
   const cwd = resolve(values.cwd ?? process.cwd())
   const stallMs = asInt(values['stall-ms'], '--stall-ms')
   const wallMs = asInt(values['wall-ms'], '--wall-ms')
-  const systemPrompt = values['system-prompt-file']
-    ? await readFile(values['system-prompt-file'], 'utf8')
-    : (values['system-prompt'] ?? DEFAULT_SYSTEM_PROMPT)
+  const systemPrompt = input.systemPrompt ?? DEFAULT_SYSTEM_PROMPT
   const registry = builtinRegistry(values.tools)
   const mcpSpecs = (values['mcp-server'] ?? []).map(parseMcpServerSpec)
   const engineMode = oneOf(values.engine ?? process.env.OBREW_ENGINE ?? 'shared', ENGINE_MODES, '--engine')
   const maxIterations = asInt(values['max-iterations'], '--max-iterations')
-  const outputSchema = values['output-schema'] ? await loadOutputSchema(values['output-schema']) : undefined
+  const outputSchema = input.outputSchema ?? (values['output-schema'] ? await loadOutputSchema(values['output-schema']) : undefined)
   const grammar = values.grammar ? await loadGrammar(values.grammar) : undefined
   if (outputSchema && grammar) throw new UsageError('--output-schema and --grammar cannot be combined')
   const requestedMode = pairs.tool_mode
@@ -177,6 +229,7 @@ export async function runExec(argv: string[]): Promise<number> {
     out.event(event)
   }
   const idleTtlMs = pairs.engine_idle_ms !== undefined ? asInt(pairs.engine_idle_ms, '-c engine_idle_ms') : undefined
+  const engineConsole = engineConsoleFrom(pairs)
 
   try {
     await reapOrphans(out.log)
@@ -184,9 +237,13 @@ export async function runExec(argv: string[]): Promise<number> {
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
-    const imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
+    let imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
     if (imagePaths.length > 0 && !model.mmprojPath) {
-      throw new ObrewError('bad_request', `${model.id} has no vision projector; pull it with --mmproj to use --image`)
+      // Degrade, loudly, rather than fail: a host attaches a still to every critique turn, and
+      // a model pulled without its projector would otherwise fail the whole job on the first
+      // one. The prompt still names the file; the turn runs on text alone.
+      out.log(`warning: ${model.id} has no vision projector, so --image is ignored; pull it with --mmproj to see images`)
+      imagePaths = []
     }
     const images = await Promise.all(imagePaths.map(imagePart))
 
@@ -220,6 +277,7 @@ export async function runExec(argv: string[]): Promise<number> {
       signal: controller.signal,
       log: out.log,
       idleTtlMs,
+      console: engineConsole,
       onStatus: (state) => {
         armStall()
         emit({ type: 'engine.status', state })

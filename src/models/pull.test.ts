@@ -1,9 +1,15 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { tempHome } from '../../test/fixtures/home'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { rm, writeFile } from 'node:fs/promises'
+import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
+import { runLogin } from '../cli/commands/login'
+import { DEFAULT_LOGIN_MODEL } from '../shared/config'
 import { pullModel } from './pull'
-import { loadRegistry, removeModel, resolveModel, setDefault } from './registry'
+import { defaultModelId, loadRegistry, removeModel, resolveModel, setDefault } from './registry'
 
-/** A fake Hub: one repo with two quants and an mmproj, served with Range support. */
+/**
+ * A fake Hub, served with Range support: one repo with two quants and an mmproj, and the
+ * built-in default's repo with its one file, so `obrew login` can be run against it.
+ */
 describe('pullModel', () => {
   let home: Awaited<ReturnType<typeof tempHome>>
   let server: ReturnType<typeof Bun.serve>
@@ -11,6 +17,11 @@ describe('pullModel', () => {
     'm-Q4_K_M.gguf': new Uint8Array(70_000).map((_, i) => i % 251),
     'm-Q8_0.gguf': new Uint8Array(1000).fill(7),
     'mmproj-F16.gguf': new Uint8Array(500).fill(9),
+  }
+  const [builtInRepo, builtInFile] = DEFAULT_LOGIN_MODEL.split(':') as [string, string]
+  const repos: Record<string, Record<string, Uint8Array>> = {
+    'org/repo': files,
+    [builtInRepo]: { [builtInFile]: new Uint8Array(3000).fill(3) },
   }
   const sha = (b: Uint8Array) => new Bun.CryptoHasher('sha256').update(b).digest('hex')
   let requests: string[] = []
@@ -22,14 +33,17 @@ describe('pullModel', () => {
       fetch(req) {
         const url = new URL(req.url)
         requests.push(`${req.method} ${url.pathname} ${req.headers.get('range') ?? ''}`.trim())
-        if (url.pathname === '/api/models/org/repo/tree/main') {
+        const tree = url.pathname.match(/^\/api\/models\/([^/]+\/[^/]+)\/tree\/main$/)
+        if (tree) {
+          const repo = repos[tree[1]!]
+          if (!repo) return new Response('nf', { status: 404 })
           return Response.json(
-            Object.entries(files).map(([path, bytes]) => ({ type: 'file', path, size: bytes.length, lfs: { oid: sha(bytes), size: bytes.length } })),
+            Object.entries(repo).map(([path, bytes]) => ({ type: 'file', path, size: bytes.length, lfs: { oid: sha(bytes), size: bytes.length } })),
           )
         }
-        const m = url.pathname.match(/^\/org\/repo\/resolve\/main\/(.+)$/)
+        const m = url.pathname.match(/^\/([^/]+\/[^/]+)\/resolve\/main\/(.+)$/)
         if (m) {
-          const bytes = files[decodeURIComponent(m[1]!)]
+          const bytes = repos[m[1]!]?.[decodeURIComponent(m[2]!)]
           if (!bytes) return new Response('nf', { status: 404 })
           const range = req.headers.get('range')
           if (range) {
@@ -56,7 +70,7 @@ describe('pullModel', () => {
   })
   afterEach(() => home.cleanup())
 
-  test('pulls the preferred quant, verifies it, registers it as default', async () => {
+  test('pulls the preferred quant, verifies it, registers it without making it the default', async () => {
     const progress: number[] = []
     const entry = await pullModel({ spec: 'org/repo', signal: new AbortController().signal, onProgress: (_f, r) => progress.push(r) })
     expect(entry.id).toBe('org/repo:m-Q4_K_M.gguf')
@@ -64,8 +78,10 @@ describe('pullModel', () => {
     expect(await Bun.file(entry.path).arrayBuffer()).toHaveLength(70_000)
     expect(progress.at(-1)).toBe(70_000)
     const registry = await loadRegistry()
-    expect(registry.default).toBe(entry.id)
-    expect(await resolveModel(undefined)).toMatchObject({ id: entry.id })
+    expect(registry.models.map((m) => m.id)).toEqual([entry.id])
+    expect(registry.default).toBeNull()
+    await expect(resolveModel(undefined)).rejects.toMatchObject({ code: 'model_missing' })
+    expect(await resolveModel(entry.id)).toMatchObject({ id: entry.id })
   })
 
   test('resumes a cut-off download with a Range request and still verifies', async () => {
@@ -82,22 +98,89 @@ describe('pullModel', () => {
     expect(sha(bytes)).toBe(sha(files['m-Q4_K_M.gguf']!))
   })
 
-  test('explicit file plus mmproj; rm removes both files; use switches default', async () => {
+  test('explicit file plus mmproj; use sets the default; rm of the default leaves none', async () => {
     const signal = new AbortController().signal
     const a = await pullModel({ spec: 'org/repo:m-Q4_K_M.gguf', signal })
     const b = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', mmproj: true, signal })
     expect(b.mmprojPath).toMatch(/mmproj-F16\.gguf$/)
-    expect((await loadRegistry()).default).toBe(a.id)
+    expect((await loadRegistry()).default).toBeNull()
     await setDefault('m-Q8_0.gguf')
     expect((await loadRegistry()).default).toBe(b.id)
     await removeModel(b.id)
     expect(await Bun.file(b.path).exists()).toBe(false)
     expect(await Bun.file(b.mmprojPath!).exists()).toBe(false)
-    expect((await loadRegistry()).default).toBe(a.id)
+    const registry = await loadRegistry()
+    expect(registry.models.map((m) => m.id)).toEqual([a.id])
+    expect(registry.default).toBeNull()
+    expect(defaultModelId(registry)).toBe(DEFAULT_LOGIN_MODEL)
   })
 
   test('a missing model is model_missing', async () => {
     await expect(resolveModel(undefined)).rejects.toMatchObject({ code: 'model_missing' })
     await expect(resolveModel('nope')).rejects.toMatchObject({ code: 'model_missing' })
+  })
+
+  describe('obrew login', () => {
+    beforeEach(() => {
+      process.env.OBREW_LLAMA_SERVER = FAKE_SERVER
+    })
+    afterEach(() => {
+      delete process.env.OBREW_LLAMA_SERVER
+    })
+    /** Runs login with its JSON events kept off the test output. */
+    const login = async () => {
+      const quiet = spyOn(process.stdout, 'write').mockImplementation(() => true)
+      try {
+        return await runLogin(['--json'])
+      } finally {
+        quiet.mockRestore()
+      }
+    }
+
+    test('a fresh install gets the built-in default, set as the default', async () => {
+      expect(await login()).toBe(0)
+      const registry = await loadRegistry()
+      expect(registry.default).toBe(DEFAULT_LOGIN_MODEL)
+      expect(registry.models.map((m) => m.id)).toEqual([DEFAULT_LOGIN_MODEL])
+    })
+
+    test('a chosen default is respected: login leaves it alone and never installs the built-in one', async () => {
+      const chosen = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(chosen.id)
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual([])
+      const registry = await loadRegistry()
+      expect(registry.default).toBe(chosen.id)
+      expect(registry.models.map((m) => m.id)).toEqual([chosen.id])
+    })
+
+    test('a chosen default that is missing is downloaded again, not swapped for the built-in one', async () => {
+      const chosen = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(chosen.id)
+      await rm(chosen.path)
+      expect(await login()).toBe(0)
+      expect(Bun.file(chosen.path).size).toBe(chosen.sizeBytes)
+      const registry = await loadRegistry()
+      expect(registry.default).toBe(chosen.id)
+      expect(registry.models.map((m) => m.id)).toEqual([chosen.id])
+    })
+
+    test('downloads nothing when the default is already on disk', async () => {
+      expect(await login()).toBe(0)
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual([])
+    })
+
+    test('a file of another size is not the same model: login downloads it again', async () => {
+      expect(await login()).toBe(0)
+      const entry = await resolveModel(undefined)
+      await writeFile(entry.path, 'GGUF')
+      await expect(resolveModel(undefined)).rejects.toMatchObject({ code: 'model_missing' })
+      expect(await login()).toBe(0)
+      expect(Bun.file(entry.path).size).toBe(entry.sizeBytes)
+      expect(await resolveModel(undefined)).toMatchObject({ id: DEFAULT_LOGIN_MODEL })
+    })
   })
 })

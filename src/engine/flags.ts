@@ -74,10 +74,20 @@ const int = (v: unknown, key: string): number => {
 }
 const bool = (v: unknown, key: string): boolean => {
   if (typeof v === 'boolean') return v
-  if (v === 'true' || v === 'on' || v === '1') return true
-  if (v === 'false' || v === 'off' || v === '0') return false
+  // `-c` values are JSON-parsed, so `key=1` arrives as the NUMBER 1.
+  if (v === 'true' || v === 'on' || v === '1' || v === 1) return true
+  if (v === 'false' || v === 'off' || v === '0' || v === 0) return false
   throw new UsageError(`-c ${key} expects true|false, got "${String(v)}"`)
 }
+
+/**
+ * `-c engine_console=true`: give a shared engine THIS RUN STARTS a visible console window
+ * (Windows only), showing llama-server's log live. A debugging aid, off by default; see
+ * ./detach.ts. Not a launch flag, so it is not part of what makes two engines the same: a
+ * warm engine is reused as it is, and the console appears the next time one starts.
+ */
+export const engineConsoleFrom = (pairs: Record<string, unknown>): boolean =>
+  pairs.engine_console !== undefined && bool(pairs.engine_console, 'engine_console')
 const str = (v: unknown): string => String(v)
 
 /** Pull the launch-time keys out of a `-c` map; everything else is left for the request. */

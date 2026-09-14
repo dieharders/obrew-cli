@@ -1,14 +1,17 @@
 /**
  * `obrew login [--model <repo[:file]>] [--variant …] [--json]`
  *
- * Idempotent setup: install the engine if it is missing, pull a model if none is installed
- * (or the one named), make it the default. This is what a host's "Sign in" button runs, in
- * a real terminal so the progress is visible.
+ * Idempotent setup: install the engine if it is missing, then make sure the default model (or
+ * the one named) is on disk and make it the default. The default is whichever model the user or
+ * a host chose, and the built-in one on a fresh install, so a choice survives the next login
+ * rather than being replaced by the built-in model. It is downloaded when missing or not the
+ * same file; that one model is all login downloads. This is what a host's "Sign in" button
+ * runs, in a real terminal so the progress is visible.
  */
 import { pullModel } from '../../models/pull'
-import { loadRegistry, setDefault } from '../../models/registry'
+import { defaultModelId, loadRegistry, setDefault } from '../../models/registry'
 import { findEngine, installEngine } from '../../engine/install'
-import { DEFAULT_LOGIN_MODEL, hfToken, loadConfig, saveConfig, VARIANTS } from '../../shared/config'
+import { hfToken, loadConfig, VARIANTS } from '../../shared/config'
 import { track, untrack } from '../../shared/proc'
 import { oneOf, parse } from '../args'
 import { createOutput } from '../output'
@@ -49,23 +52,18 @@ export async function runLogin(argv: string[]): Promise<number> {
       log(`engine ready (${engine.tag}, ${engine.variant})`)
     }
 
-    const registry = await loadRegistry()
-    const spec = values.model ?? (registry.default ? null : (config.loginModel ?? DEFAULT_LOGIN_MODEL))
-    if (spec) {
-      const entry = await pullModel({
-        spec,
-        mmproj: values.mmproj,
-        token: hfToken(config),
-        signal: controller.signal,
-        onLog: log,
-        onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
-      })
-      await setDefault(entry.id)
-      if (values.model) await saveConfig({ ...(await loadConfig()), loginModel: values.model })
-      log(`default model: ${entry.id}`)
-    } else {
-      log(`model ready (${registry.default})`)
-    }
+    // The model is fetched whenever this machine does not have it on disk as downloaded, and
+    // pullModel fetches nothing when it does. No other model is looked at.
+    const entry = await pullModel({
+      spec: values.model ?? defaultModelId(await loadRegistry()),
+      mmproj: values.mmproj,
+      token: hfToken(config),
+      signal: controller.signal,
+      onLog: log,
+      onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
+    })
+    await setDefault(entry.id)
+    log(`default model: ${entry.id}`)
 
     out.event({ type: 'setup.done', ok: true, message: 'obrew is ready' })
     return 0

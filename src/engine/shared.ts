@@ -65,7 +65,42 @@ export async function touchShared(idleTtlMs?: number): Promise<void> {
   if (record) await writeShared({ ...record, lastUsed: Date.now(), ...(idleTtlMs ? { idleTtlMs } : {}) })
 }
 
-/** Kill the recorded engine if it is still running, and drop the record. */
+/** How long a stopped engine gets to exit on its own before it is killed outright. */
+const STOP_GRACE_MS = 10_000
+const EXIT_POLL_MS = 100
+
+/**
+ * Block until `pid` is gone: the grace period for a clean exit, then SIGKILL and a short
+ * bounded wait for that to land. Returns whether it is gone.
+ */
+async function waitGone(pid: number): Promise<boolean> {
+  const soft = Date.now() + STOP_GRACE_MS
+  while (isAlive(pid) && Date.now() < soft) await Bun.sleep(EXIT_POLL_MS)
+  if (!isAlive(pid)) return true
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // Gone between the check and the kill.
+  }
+  const hard = Date.now() + 2_000
+  while (isAlive(pid) && Date.now() < hard) await Bun.sleep(EXIT_POLL_MS)
+  return !isAlive(pid)
+}
+
+/**
+ * Kill the recorded engine if it is still running, WAIT FOR IT TO EXIT, and drop the record.
+ *
+ * The wait is load-bearing, not tidiness. A replacement engine is started right after this
+ * returns, `freePort()` prefers 8082, and llama-server closes its listening socket the
+ * moment SIGTERM lands while the process itself lingers for seconds tearing down GPU
+ * buffers — so the new engine binds the SAME port the old one just held. This process has
+ * already talked to that port (the health check that found the old engine), and Bun's fetch
+ * pools connections by host:port, so the first request to the "new" engine rode the pooled
+ * keep-alive connection into the OLD, half-dead process and hung there until the stall
+ * timer fired: two minutes of nothing on every model swap, measured with Qwen3.5 → Gemma 4
+ * and back on macOS. With the old process gone its sockets are closed, the pooled connection
+ * is dead, and the next fetch opens a fresh one to the engine that is actually listening.
+ */
 export async function stopShared(): Promise<boolean> {
   const record = await readShared()
   await rm(sharedRecordPath(), { force: true }).catch(() => {})
@@ -78,6 +113,7 @@ export async function stopShared(): Promise<boolean> {
     } catch {
       // Already gone.
     }
+    await waitGone(record.pid)
   }
   await removeRunning(record.pid)
   return killed
@@ -138,6 +174,8 @@ export interface AcquireOptions {
   logPath?: string | null
   /** Idle TTL to record on a shared engine (a host with long non-model phases raises it). */
   idleTtlMs?: number
+  /** Windows: give a shared engine started here a visible console window (`-c engine_console`). */
+  console?: boolean
 }
 
 /**
@@ -173,7 +211,7 @@ export async function acquireEngine(opts: AcquireOptions): Promise<EngineHandle>
     const argv = [bin, ...prefix, ...opts.args, '--port', String(port), ...(logPath ? ['--log-file', logPath] : [])]
     const cwd = prefix.length === 0 ? dirname(bin) : process.cwd()
     opts.onStatus?.('starting')
-    const pid = await spawnDetached(argv, { cwd, env: opts.env })
+    const pid = await spawnDetached(argv, { cwd, env: opts.env, console: opts.console })
     await recordRunning({ pid, port, ownerPid: process.pid, model: opts.model, startedAt: new Date().toISOString(), shared: true })
     const client = new EngineClient(`http://127.0.0.1:${port}`)
     const giveUp = async () => {

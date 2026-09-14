@@ -29,6 +29,8 @@ export interface TurnOptions {
   /** Extra body fields (tools, response_format, grammar). */
   extra?: Record<string, unknown>
   constrained?: boolean
+  /** A tool choice, fill or repair: sampled at `gen.toolTemperature` (see effort.ts). */
+  toolCall?: boolean
 }
 
 /** Merge streamed tool-call fragments by index into complete calls. */
@@ -45,7 +47,7 @@ function mergeToolCalls(acc: Map<number, ToolCall>, deltas: ChatDelta['toolCalls
 export async function runTurn(opts: TurnOptions): Promise<TurnResult> {
   const body = {
     messages: opts.messages,
-    ...requestParams(opts.gen, { constrained: opts.constrained }),
+    ...requestParams(opts.gen, { constrained: opts.constrained, toolCall: opts.toolCall }),
     ...(opts.extra ?? {}),
   }
 
