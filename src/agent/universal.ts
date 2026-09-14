@@ -46,6 +46,7 @@ async function constrainedJson(
     onActivity: opts.onActivity,
     extra: jsonSchemaBody(schema),
     constrained: true,
+    toolCall: true,
   })
   try {
     return JSON.parse(turn.message.content ?? '')

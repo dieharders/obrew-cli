@@ -160,6 +160,11 @@ describe('runAgent', () => {
     expect(reqs[2]!.response_format).toMatchObject({ type: 'json_schema' })
     expect(reqs[3]!.response_format).toBeUndefined()
     expect(reqs[3]!.tools).toBeUndefined()
+    // Choose and fill are sampled near-greedy; the free answer keeps the effort temperature.
+    const gen = base(client, builtinRegistry('Read'), []).gen
+    expect(reqs[0]!.temperature).toBe(0.1)
+    expect(reqs[1]!.temperature).toBe(0.1)
+    expect(reqs[3]!.temperature).toBe(gen.temperature)
   })
 
   test('output schema: tools first, then one constrained request whose JSON is the output', async () => {

@@ -15,6 +15,9 @@
  *                          last repeats). Each: { text?, reasoning?, toolCalls?: [{name,
  *                          arguments}], finish? }. Overrides FAKE_REPLY / FAKE_REASONING.
  *   FAKE_LOG_REQUESTS=<p>  append every chat request body as a JSON line to this file
+ *   FAKE_LINGER_MS=<n>     on SIGTERM close the listener but stay alive for n ms, leaving any
+ *                          open keep-alive connection up and answering nothing on it — how
+ *                          llama-server behaves while it tears down GPU buffers
  */
 import { appendFileSync } from 'node:fs'
 
@@ -110,11 +113,17 @@ async function streamChat(body: ChatBody): Promise<Response> {
   return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
 }
 
-Bun.serve({
+const lingerMs = Number(env.FAKE_LINGER_MS ?? 0)
+let stopping = false
+
+const server = Bun.serve({
   hostname: '127.0.0.1',
   port,
   idleTimeout: 60,
   async fetch(req) {
+    // A request that arrives on a kept-alive connection after the listener closed: accepted,
+    // never answered (llama-server's task queue is already stopped by then).
+    if (stopping) return new Promise<Response>(() => {})
     const url = new URL(req.url)
     if (url.pathname === '/health') {
       if (Date.now() - startedAt < loadMs) return new Response('{"error":{"message":"Loading model"}}', { status: 503 })
@@ -143,3 +152,11 @@ Bun.serve({
     return new Response('not found', { status: 404 })
   },
 })
+
+if (lingerMs > 0) {
+  process.on('SIGTERM', () => {
+    stopping = true
+    server.stop() // the listener only; open connections stay open
+    setTimeout(() => process.exit(0), lingerMs)
+  })
+}

@@ -295,6 +295,7 @@ async function executeCall(
       ],
       extra: jsonSchemaBody(tool.inputSchema),
       constrained: true,
+      toolCall: true,
     })
     args = parseArgs(repair.message.content ?? '')
     violations = args ? validate(args, tool.inputSchema) : violations

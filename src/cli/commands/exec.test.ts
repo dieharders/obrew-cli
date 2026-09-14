@@ -358,11 +358,18 @@ describe('obrew exec --image', () => {
     expect(stored.messages[1]!.content).toMatch(/^\[image: .*still\.png\]\ndescribe$/)
   }, TIMEOUT_MS)
 
-  test('a model without an mmproj refuses --image as bad_request', async () => {
+  test('a model without an mmproj drops --image with a warning and answers on text alone', async () => {
+    // A host attaches a still to every critique turn; failing the turn would fail its job on
+    // the first slide. The image is dropped, the log says so, and the prompt still names the
+    // file for the model to Read.
     await registry(null)
-    const { events, code } = await run(['exec', '--json', '--image', join(home.dir, 'still.png'), 'describe'])
-    expect(code).toBe(1)
-    expect(events.at(-1)).toMatchObject({ type: 'turn.failed', code: 'bad_request' })
+    const log = join(home.dir, 'requests.jsonl')
+    const { events, code, stderr } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], { FAKE_LOG_REQUESTS: log })
+    expect(code).toBe(0)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed' })
+    expect(stderr).toMatch(/no vision projector/)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages.find((m) => m.role === 'user')!.content).toBe('describe')
   }, TIMEOUT_MS)
 })
 

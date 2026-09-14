@@ -38,7 +38,8 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
   --json                     one JSON event per line on stdout
   --model <id>               installed model id (default: the registry default)
   --effort low|medium|high   thinking on/off and answer length (default: low)
-  -c key=value               run knob; repeatable. thinking, max_tokens, temperature, top_p,
+  -c key=value               run knob; repeatable. thinking, max_tokens, temperature,
+                             tool_temperature (tool choice/arguments; default 0.1), top_p,
                              top_k, min_p, seed, stop, ctx_size, n_gpu_layers, threads,
                              batch_size, cache_type_k, cache_type_v, mmap, mlock
   --cwd <dir>                working directory for tools (default: current)
@@ -236,9 +237,13 @@ export async function runExec(argv: string[]): Promise<number> {
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
-    const imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
+    let imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
     if (imagePaths.length > 0 && !model.mmprojPath) {
-      throw new ObrewError('bad_request', `${model.id} has no vision projector; pull it with --mmproj to use --image`)
+      // Degrade, loudly, rather than fail: a host attaches a still to every critique turn, and
+      // a model pulled without its projector would otherwise fail the whole job on the first
+      // one. The prompt still names the file; the turn runs on text alone.
+      out.log(`warning: ${model.id} has no vision projector, so --image is ignored; pull it with --mmproj to see images`)
+      imagePaths = []
     }
     const images = await Promise.all(imagePaths.map(imagePart))
 

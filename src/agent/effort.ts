@@ -17,6 +17,15 @@ export interface GenerationSettings {
   thinking: boolean
   maxTokens: number
   temperature: number
+  /**
+   * Temperature for a TOOL-CALL request: universal choose + fill, and the one argument repair.
+   * Near-greedy by default, whatever the effort: choosing a tool and filling its arguments is
+   * a lookup against the transcript, not authorship, and at the effort temperature a small
+   * model picked a plausible wrong tool or re-filled arguments it had just seen fail.
+   * `-c tool_temperature=` overrides; never raised above `temperature`. A NATIVE tool call is
+   * part of the free turn and cannot be sampled apart from it, so this does not reach it.
+   */
+  toolTemperature: number
   topP?: number
   topK?: number
   minP?: number
@@ -25,10 +34,12 @@ export interface GenerationSettings {
   repeatPenalty?: number
 }
 
-const TABLE: Record<Effort, Pick<GenerationSettings, 'thinking' | 'maxTokens' | 'temperature'>> = {
-  low: { thinking: false, maxTokens: 4096, temperature: 0.2 },
-  medium: { thinking: true, maxTokens: 8192, temperature: 0.3 },
-  high: { thinking: true, maxTokens: 16384, temperature: 0.3 },
+export const TOOL_TEMPERATURE = 0.1
+
+const TABLE: Record<Effort, Pick<GenerationSettings, 'thinking' | 'maxTokens' | 'temperature' | 'toolTemperature'>> = {
+  low: { thinking: false, maxTokens: 4096, temperature: 0.2, toolTemperature: TOOL_TEMPERATURE },
+  medium: { thinking: true, maxTokens: 8192, temperature: 0.3, toolTemperature: TOOL_TEMPERATURE },
+  high: { thinking: true, maxTokens: 16384, temperature: 0.3, toolTemperature: TOOL_TEMPERATURE },
 }
 
 const num = (v: unknown, key: string): number => {
@@ -52,6 +63,9 @@ export function generationFor(effort: Effort, pairs: Record<string, unknown> = {
         break
       case 'temperature':
         out.temperature = num(value, key)
+        break
+      case 'tool_temperature':
+        out.toolTemperature = num(value, key)
         break
       case 'top_p':
         out.topP = num(value, key)
@@ -81,11 +95,11 @@ export function generationFor(effort: Effort, pairs: Record<string, unknown> = {
 /** The request-body fields for one `/v1/chat/completions` call. */
 export function requestParams(
   gen: GenerationSettings,
-  opts: { constrained?: boolean } = {},
+  opts: { constrained?: boolean; toolCall?: boolean } = {},
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     max_tokens: gen.maxTokens,
-    temperature: gen.temperature,
+    temperature: opts.toolCall ? Math.min(gen.temperature, gen.toolTemperature) : gen.temperature,
   }
   if (gen.topP !== undefined) body.top_p = gen.topP
   if (gen.topK !== undefined) body.top_k = gen.topK
