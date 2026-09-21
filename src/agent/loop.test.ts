@@ -3,7 +3,7 @@
  * FAKE_SCRIPT of replies, one per chat request, and asserts both the events and the request
  * bodies the fake logged (that is where "was this request constrained" is visible).
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -165,6 +165,34 @@ describe('runAgent', () => {
     expect(reqs[0]!.temperature).toBe(0.1)
     expect(reqs[1]!.temperature).toBe(0.1)
     expect(reqs[3]!.temperature).toBe(gen.temperature)
+    // The choose answer is bounded twice (see REASON_MAX_CHARS); the fill keeps the effort's cap.
+    expect(JSON.stringify(reqs[0]!.response_format)).toContain(
+      '"reason":{"type":"string","maxLength":200}',
+    )
+    expect(reqs[0]!.max_tokens).toBe(512)
+    expect(reqs[1]!.max_tokens).toBe(gen.maxTokens)
+  })
+
+  test('universal: a choose cut off at max_tokens is reported on stderr and answered without a tool', async () => {
+    const client = await start([
+      { text: '{"tool":"Read","reason":"the still shows the still shows the', finish: 'length' },
+      { text: 'final answer' },
+    ])
+    const stderr = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const events: ExecEvent[] = []
+      const result = await runAgent({
+        ...base(client, builtinRegistry('Read'), events),
+        toolMode: 'universal',
+      })
+      expect(result.finalText).toBe('final answer')
+      expect(events.filter((e) => e.type === 'tool.start')).toHaveLength(0)
+      expect(stderr).toHaveBeenCalledWith(
+        '[universal] choose stopped at max_tokens (512) before its JSON closed',
+      )
+    } finally {
+      stderr.mockRestore()
+    }
   })
 
   test('output schema: tools first, then one constrained request whose JSON is the output', async () => {

@@ -5,7 +5,7 @@
  * asks for it with `-c tool_mode=universal`.
  *
  *   1. CHOOSE  — decoded under `{ tool: <enum of names | "none">, reason }` after reading
- *                markdown cards for every tool.
+ *                markdown cards for every tool, its length bounded (see REASON_MAX_CHARS).
  *   2. FILL    — decoded under the chosen tool's own inputSchema.
  *
  * Both requests run with thinking off (see effort.ts). "none" means the model wants to answer
@@ -32,15 +32,34 @@ const CHOOSE_INSTRUCTIONS =
   'to answer directly. If tool results above already contain what the request needs, choose ' +
   '"none". Never repeat a call whose result is already shown. Reply with JSON only.'
 
+/**
+ * How long a CHOOSE answer may run. Bounded twice, because unbounded it ran for minutes.
+ *
+ * `reason` comes after the choice in the answer (`tool` is first and the only required key) and
+ * nothing reads it, yet as a bare string nothing ended it but `max_tokens`. With a vision still
+ * attached, Gemma 4 E2B wrote 190–371 tokens of it on a healthy critique turn, and on two of the
+ * five in one motionbuff job it never closed the string at all: 8,192 tokens each (the `medium`
+ * effort's cap), about 255 s at 32 tok/s, then a parse failure that silently became "no tool".
+ * The grammar now ends the string at REASON_MAX_CHARS, and CHOOSE_MAX_TOKENS is the backstop for
+ * whatever the grammar cannot see — well above anything a capped answer reaches.
+ *
+ * FILL gets no such cap: its arguments can legitimately be a whole file for a write.
+ */
+const REASON_MAX_CHARS = 200
+const CHOOSE_MAX_TOKENS = 512
+
 async function constrainedJson(
   opts: UniversalOptions,
   messages: ChatMessage[],
   schema: Record<string, unknown>,
+  step: 'choose' | 'fill',
+  maxTokens = opts.gen.maxTokens,
 ): Promise<unknown> {
+  const gen = { ...opts.gen, maxTokens: Math.min(opts.gen.maxTokens, maxTokens) }
   const turn = await runTurn({
     client: opts.client,
     messages,
-    gen: opts.gen,
+    gen,
     signal: opts.signal,
     emit: () => {},
     onActivity: opts.onActivity,
@@ -48,6 +67,14 @@ async function constrainedJson(
     constrained: true,
     toolCall: true,
   })
+  // A stop on max_tokens leaves the JSON unclosed, which parses to null below and becomes "no
+  // tool" (choose) or empty arguments (fill) without a word. These requests stream nothing to the
+  // caller, so stderr — where obrew's diagnostics go — is the only place it can show.
+  if (turn.finishReason === 'length') {
+    console.error(
+      `[universal] ${step} stopped at max_tokens (${gen.maxTokens}) before its JSON closed`,
+    )
+  }
   try {
     return JSON.parse(turn.message.content ?? '')
   } catch {
@@ -67,15 +94,21 @@ export async function universalSelect(opts: UniversalOptions): Promise<ToolCall 
       content: `${CHOOSE_INSTRUCTIONS}\n\n${opts.registry.markdown()}`,
     },
   ]
-  const choice = (await constrainedJson(opts, chooseMessages, {
-    type: 'object',
-    properties: {
-      tool: { type: 'string', enum: [...names, 'none'] },
-      reason: { type: 'string' },
+  const choice = (await constrainedJson(
+    opts,
+    chooseMessages,
+    {
+      type: 'object',
+      properties: {
+        tool: { type: 'string', enum: [...names, 'none'] },
+        reason: { type: 'string', maxLength: REASON_MAX_CHARS },
+      },
+      required: ['tool'],
+      additionalProperties: false,
     },
-    required: ['tool'],
-    additionalProperties: false,
-  })) as { tool?: string } | null
+    'choose',
+    CHOOSE_MAX_TOKENS,
+  )) as { tool?: string } | null
   const tool = choice?.tool ? opts.registry.get(choice.tool) : undefined
   if (!tool) return null
 
@@ -94,7 +127,7 @@ export async function universalSelect(opts: UniversalOptions): Promise<ToolCall 
         `exactly what it reported; never repeat arguments that already failed.\n\nReply with the JSON arguments only.`,
     },
   ]
-  const args = await constrainedJson(opts, fillMessages, tool.inputSchema)
+  const args = await constrainedJson(opts, fillMessages, tool.inputSchema, 'fill')
   return {
     id: `call_${Date.now().toString(36)}`,
     type: 'function',
