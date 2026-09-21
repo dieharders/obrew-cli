@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FAKE_SERVER, tempHome } from '../../../test/fixtures/home'
+import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
 import { saveRegistry } from '../../models/registry'
 import type { ExecEvent } from '../../shared/events'
 import { ExecEventSchema } from '../../shared/events'
@@ -16,11 +17,11 @@ const MAIN = join(import.meta.dir, '..', '..', 'main.ts')
 /** Each run spawns obrew, which spawns the fake engine: allow well over the 5 s default. */
 const TIMEOUT_MS = 30_000
 
-async function run(args: string[], env: Record<string, string> = {}) {
+async function run(args: string[], env: Record<string, string> = {}, stdin?: string) {
   const proc = Bun.spawn([process.execPath, MAIN, ...args], {
     // Ephemeral by default here: a shared fake engine would outlive the throwaway home.
     env: { ...process.env, OBREW_LLAMA_SERVER: FAKE_SERVER, OBREW_ENGINE: 'ephemeral', ...env },
-    stdin: 'ignore',
+    stdin: stdin === undefined ? 'ignore' : new Blob([stdin]),
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -105,6 +106,44 @@ describe('obrew exec --json', () => {
     expect(stdout).toContain('plain text')
   }, TIMEOUT_MS)
 
+  test('--input-format json: prompt and system prompt from stdin, past the argv size cap', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    // Well over the ~32 KB Windows puts on a whole command line.
+    const prompt = `build slide 3 ${'x'.repeat(100_000)}`
+    const { code } = await run(
+      ['exec', '--json', '--tools', 'none', '--input-format', 'json'],
+      { FAKE_LOG_REQUESTS: log, FAKE_REPLY: 'ok' },
+      JSON.stringify({ prompt, systemPrompt: 'house rules' }),
+    )
+    expect(code).toBe(0)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages[0]).toEqual({ role: 'system', content: 'house rules' })
+    expect(JSON.stringify(req.messages.find((m) => m.role === 'user')!.content)).toContain(prompt)
+  }, TIMEOUT_MS)
+
+  test('--input-format json without a systemPrompt uses the default', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    const { code } = await run(['exec', '--json', '--tools', 'none', '--input-format', 'json'], { FAKE_LOG_REQUESTS: log, FAKE_REPLY: 'ok' }, JSON.stringify({ prompt: 'hi' }))
+    expect(code).toBe(0)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages[0]).toEqual({ role: 'system', content: DEFAULT_SYSTEM_PROMPT })
+  }, TIMEOUT_MS)
+
+  test('--input-format json refuses a second prompt source, bad JSON and unknown fields', async () => {
+    const withArg = await run(['exec', '--json', '--input-format', 'json', 'hi'], {}, JSON.stringify({ prompt: 'hi' }))
+    expect(withArg.code).toBe(2)
+    expect(withArg.stderr).toContain('reads the prompt and system prompt from stdin')
+    const withFlag = await run(['exec', '--json', '--input-format', 'json', '--system-prompt', 'x'], {}, JSON.stringify({ prompt: 'hi' }))
+    expect(withFlag.code).toBe(2)
+    const garbage = await run(['exec', '--json', '--input-format', 'json'], {}, 'not json')
+    expect(garbage.code).toBe(2)
+    expect(garbage.stderr).toContain('stdin is not a JSON object')
+    const typo = await run(['exec', '--json', '--input-format', 'json'], {}, JSON.stringify({ prompt: 'hi', system: 'x' }))
+    expect(typo.code).toBe(2)
+    const nothing = await run(['exec', '--json', '--input-format', 'json'])
+    expect(nothing.code).toBe(2)
+  }, TIMEOUT_MS)
+
   test('auth status reflects the fake setup', async () => {
     const proc = Bun.spawnSync([process.execPath, MAIN, 'auth', 'status', '--json'], {
       env: { ...process.env, OBREW_LLAMA_SERVER: FAKE_SERVER },
@@ -151,14 +190,43 @@ describe('obrew exec --json with tools', () => {
     expect(stored.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'tool', 'assistant'])
   }, TIMEOUT_MS)
 
-  test('--output-schema puts parsed JSON on turn.completed', async () => {
-    const script = JSON.stringify([{ text: 'thinking about it' }, { text: '{"n": 7}' }])
+  test('--output-schema puts parsed JSON on turn.completed, in one constrained request', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    const script = JSON.stringify([{ text: '{"n": 7}' }])
     const { events, code } = await run(
       ['exec', '--json', '--tools', 'none', '--output-schema', '{"type":"object","properties":{"n":{"type":"integer"}}}', 'how many'],
-      { FAKE_SCRIPT: script },
+      { FAKE_SCRIPT: script, FAKE_LOG_REQUESTS: log },
     )
     expect(code).toBe(0)
-    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 7 } })
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 7 }, iterations: 1 })
+    const reqs = (await Bun.file(log).text()).trim().split('\n')
+    expect(reqs).toHaveLength(1)
+    expect(JSON.parse(reqs[0]!)).toMatchObject({ response_format: { type: 'json_schema' } })
+  }, TIMEOUT_MS)
+
+  test('--input-format json carries the output schema, past the argv size cap', async () => {
+    const log = join(home.dir, 'requests.jsonl')
+    // Well over the ~32 KB Windows puts on a whole command line.
+    const outputSchema = { type: 'object', properties: { n: { type: 'integer', description: 'x'.repeat(40_000) } }, required: ['n'] }
+    const { events, code } = await run(
+      ['exec', '--json', '--tools', 'none', '--input-format', 'json'],
+      { FAKE_SCRIPT: JSON.stringify([{ text: '{"n": 3}' }]), FAKE_LOG_REQUESTS: log },
+      JSON.stringify({ prompt: 'how many', outputSchema }),
+    )
+    expect(code).toBe(0)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed', output: { n: 3 } })
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { response_format: { json_schema: { schema: unknown } } }
+    expect(req.response_format.json_schema.schema).toEqual(outputSchema)
+  }, TIMEOUT_MS)
+
+  test('an output schema on stdin and --output-schema together is a usage error', async () => {
+    const { code, stderr } = await run(
+      ['exec', '--json', '--input-format', 'json', '--output-schema', '{"type":"object"}'],
+      {},
+      JSON.stringify({ prompt: 'hi', outputSchema: { type: 'object' } }),
+    )
+    expect(code).toBe(2)
+    expect(stderr).toContain('cannot be combined')
   }, TIMEOUT_MS)
 
   test('--max-iterations exhaustion reports max_iterations on a completed turn (exit 0)', async () => {
@@ -266,12 +334,15 @@ describe('obrew exec --image', () => {
   })
   afterEach(() => home.cleanup())
 
-  const registry = (mmproj: string | null) =>
-    saveRegistry({
+  /** `onDisk: false` records a projector the machine does not have, as a deleted file leaves. */
+  const registry = async (mmproj: string | null, onDisk = true) => {
+    if (mmproj && onDisk) await writeFile(mmproj, 'GGUF')
+    await saveRegistry({
       version: 1,
       default: 'org/repo:m.gguf',
       models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: mmproj, sizeBytes: 4, addedAt: '' }],
     })
+  }
 
   test('sends the image as a data URL part and keeps a marker in the transcript', async () => {
     await registry(join(home.dir, 'mmproj.gguf'))
@@ -290,11 +361,30 @@ describe('obrew exec --image', () => {
     expect(stored.messages[1]!.content).toMatch(/^\[image: .*still\.png\]\ndescribe$/)
   }, TIMEOUT_MS)
 
-  test('a model without an mmproj refuses --image as bad_request', async () => {
+  test('a model without an mmproj drops --image with a warning and answers on text alone', async () => {
+    // A host attaches a still to every critique turn; failing the turn would fail its job on
+    // the first slide. The image is dropped, the log says so, and the prompt still names the
+    // file for the model to Read.
     await registry(null)
-    const { events, code } = await run(['exec', '--json', '--image', join(home.dir, 'still.png'), 'describe'])
-    expect(code).toBe(1)
-    expect(events.at(-1)).toMatchObject({ type: 'turn.failed', code: 'bad_request' })
+    const log = join(home.dir, 'requests.jsonl')
+    const { events, code, stderr } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], { FAKE_LOG_REQUESTS: log })
+    expect(code).toBe(0)
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed' })
+    expect(stderr).toMatch(/no vision projector/)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages.find((m) => m.role === 'user')!.content).toBe('describe')
+  }, TIMEOUT_MS)
+
+  test('a projector the registry records but the machine does not have degrades the same way', async () => {
+    // Not a failure to start: `--mmproj <missing path>` stops llama-server dead, so a recorded
+    // projector that is gone is no vision support. `obrew models pull <id>` fetches it back.
+    await registry(join(home.dir, 'mmproj.gguf'), false)
+    const log = join(home.dir, 'requests.jsonl')
+    const { code, stderr } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], { FAKE_LOG_REQUESTS: log })
+    expect(code).toBe(0)
+    expect(stderr).toMatch(/no vision projector/)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages.find((m) => m.role === 'user')!.content).toBe('describe')
   }, TIMEOUT_MS)
 })
 
@@ -313,12 +403,14 @@ describe('obrew exec: images through Read', () => {
   })
   afterEach(() => home.cleanup())
 
-  const registry = (mmproj: string | null) =>
-    saveRegistry({
+  const registry = async (mmproj: string | null) => {
+    if (mmproj) await writeFile(mmproj, 'GGUF')
+    await saveRegistry({
       version: 1,
       default: 'org/repo:m.gguf',
       models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: mmproj, sizeBytes: 4, addedAt: '' }],
     })
+  }
 
   test('with a vision model, Read of a still hands the model the image', async () => {
     await registry(join(home.dir, 'mmproj.gguf'))

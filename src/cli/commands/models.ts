@@ -2,7 +2,7 @@
  * `obrew models list|pull|rm|use`
  */
 import { pullModel } from '../../models/pull'
-import { findModel, loadRegistry, removeModel, setDefault } from '../../models/registry'
+import { BUILT_IN_DEFAULT_MODEL, defaultModel, findModel, loadRegistry, removeModel, setDefault } from '../../models/registry'
 import { hfToken, loadConfig, saveConfig } from '../../shared/config'
 import { humanBytes } from '../../shared/download'
 import { ObrewError, UsageError } from '../../shared/errors'
@@ -33,17 +33,23 @@ export async function runModels(argv: string[]): Promise<number> {
   switch (sub) {
     case 'list': {
       const registry = await loadRegistry()
+      const dflt = await defaultModel(registry)
       if (values.json) {
-        console.log(JSON.stringify(registry))
+        console.log(JSON.stringify({ ...registry, default: dflt.id, chosen: dflt.chosen, defaultInstalled: dflt.installed }))
         return 0
       }
       if (registry.models.length === 0) {
-        console.log('no models installed; try `obrew models pull unsloth/Qwen3-4B-GGUF`')
+        console.log(`no models installed; run \`obrew login\` to install the default (${BUILT_IN_DEFAULT_MODEL})`)
         return 0
       }
       for (const m of registry.models) {
-        const mark = m.id === registry.default ? '*' : ' '
+        const mark = m.id === dflt.id ? '*' : ' '
         console.log(`${mark} ${m.id}  ${humanBytes(m.sizeBytes)}${m.mmprojPath ? '  +mmproj' : ''}`)
+      }
+      // The `*` is on nothing when the default is a model this machine does not have, which
+      // reads as "no default at all" unless it says which one and how to point it elsewhere.
+      if (!dflt.installed) {
+        console.log(`\ndefault: ${dflt.id} (not installed) — run \`obrew login\`, or \`obrew models use <id>\` to default to one of the above`)
       }
       return 0
     }
@@ -65,6 +71,15 @@ export async function runModels(argv: string[]): Promise<number> {
           onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
         })
         out.event({ type: 'download.done', file: entry.file, path: entry.path })
+        // A pull never chooses the default. When it did not become one anyway, say which
+        // command would, so `obrew exec` right after a pull is not a dead end.
+        const dflt = await defaultModel(await loadRegistry())
+        if (dflt.id !== entry.id) {
+          out.event({
+            type: 'setup.log',
+            message: `the default is still ${dflt.id}${dflt.installed ? '' : ' (not installed)'}; \`obrew models use ${entry.id}\` makes this one the default`,
+          })
+        }
         return 0
       } finally {
         process.off('SIGINT', onSignal)

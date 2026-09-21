@@ -8,14 +8,16 @@
 import { join } from 'node:path'
 import { downloadVerified } from '../shared/download'
 import { modelsDir } from '../shared/paths'
-import { authHeaders, chooseGguf, chooseMmproj, listRepoFiles, modelId, parseModelSpec, resolveUrl, type HfFile } from './hf'
-import { addModel, loadRegistry, findModel, type ModelEntry } from './registry'
+import { authHeaders, chooseGguf, chooseMmproj, isMmproj, listRepoFiles, modelId, parseModelSpec, resolveUrl, type HfFile } from './hf'
+import { addModel, loadRegistry, findModel, isOnDisk, projectorPath, setDefault, type ModelEntry } from './registry'
 
 export interface PullOptions {
   /** `org/repo[:file]` */
   spec: string
   /** `true` = pick the repo's mmproj automatically; a string names one. */
   mmproj?: boolean | string
+  /** Make it the default once it is installed. `obrew login` does; `obrew models pull` does not. */
+  makeDefault?: boolean
   token?: string
   signal: AbortSignal
   onLog?: (message: string) => void
@@ -26,7 +28,9 @@ const repoDir = (repoId: string) => join(modelsDir(), repoId.replace('/', '--'))
 
 async function fetchFile(repoId: string, file: HfFile, opts: PullOptions): Promise<string> {
   const dest = join(repoDir(repoId), file.path.split('/').pop()!)
-  if ((await Bun.file(dest).exists()) && Bun.file(dest).size === file.size) {
+  // `file.size` is what the listing advertised, and a repo that advertises none gives 0 — which
+  // must not let an empty leftover file pass for the artifact.
+  if (file.size > 0 && (await Bun.file(dest).exists()) && Bun.file(dest).size === file.size) {
     opts.onLog?.(`${file.path} already present`)
     return dest
   }
@@ -48,11 +52,16 @@ async function fetchFile(repoId: string, file: HfFile, opts: PullOptions): Promi
 export async function pullModel(opts: PullOptions): Promise<ModelEntry> {
   const { repoId, file } = parseModelSpec(opts.spec)
 
-  // Already installed under that exact id: nothing to fetch (mmproj may still be added).
+  // Already on disk under that exact id: nothing to fetch (mmproj may still be added). A file
+  // that is missing or of another size is not that model, and is fetched again — and so is a
+  // projector the entry claims but no longer has, since an `--image` run would otherwise hand
+  // llama-server an `--mmproj` path that is not there.
   const registry = await loadRegistry()
   const existing = file ? findModel(registry, modelId(repoId, file)) : null
-  if (existing && !opts.mmproj && (await Bun.file(existing.path).exists())) {
+  const projectorGone = !!existing?.mmprojPath && (await projectorPath(existing)) === null
+  if (existing && !opts.mmproj && !projectorGone && (await isOnDisk(existing))) {
     opts.onLog?.(`${existing.id} is already installed`)
+    if (opts.makeDefault) await setDefault(existing.id)
     return existing
   }
 
@@ -64,6 +73,11 @@ export async function pullModel(opts: PullOptions): Promise<ModelEntry> {
   if (opts.mmproj) {
     const proj = chooseMmproj(files, typeof opts.mmproj === 'string' ? opts.mmproj : null)
     mmprojPath = await fetchFile(repoId, proj, opts)
+  } else if (projectorGone) {
+    // Repairing what the entry recorded, not a request for vision: a repo that no longer
+    // publishes a projector drops back to a text-only entry instead of failing the pull.
+    const proj = files.some((f) => isMmproj(f.path)) ? chooseMmproj(files, null) : null
+    mmprojPath = proj ? await fetchFile(repoId, proj, opts) : null
   }
 
   const entry: ModelEntry = {
@@ -72,10 +86,13 @@ export async function pullModel(opts: PullOptions): Promise<ModelEntry> {
     file: gguf.path.split('/').pop()!,
     path,
     mmprojPath,
-    sizeBytes: gguf.size,
+    // The bytes that were written, not the size the listing advertised: `isOnDisk` compares
+    // against this, and a listing that is stale or carries no size would otherwise mark a
+    // download that verified against its SHA-256 as incomplete on every later run.
+    sizeBytes: Bun.file(path).size,
     addedAt: new Date().toISOString(),
   }
-  await addModel(entry)
+  await addModel(entry, { makeDefault: opts.makeDefault })
   opts.onLog?.(`installed ${entry.id}`)
   return entry
 }

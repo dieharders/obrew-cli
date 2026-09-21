@@ -11,6 +11,20 @@ import { z } from 'zod'
 import { ObrewError } from '../shared/errors'
 import { registryPath } from '../shared/paths'
 
+/**
+ * The built-in default chat model: the out-of-the-box default, and what `obrew login` installs
+ * on a fresh machine. It applies when nothing else here does; once the user or a host chooses
+ * another (`obrew models use <id>`), login installs that one instead and never reinstates this.
+ *
+ * Gemma 4 E2B at Q8_0 (~5 GB). On the same deck builds it finished in either tool mode with
+ * the better content; Qwen3.5-2B finished only under `universal` and overran its time budget.
+ * Qwen3-0.6B could fill a plan but not drive a build: it lost count of slides under a long
+ * schema and re-issued the same tool call until the loop cut it off. 8-bit rather than Q4
+ * because at this size the quantisation error is a real share of the model, and the larger
+ * download is cheap next to a tool call that comes out wrong.
+ */
+export const BUILT_IN_DEFAULT_MODEL = 'unsloth/gemma-4-E2B-it-GGUF:gemma-4-E2B-it-Q8_0.gguf'
+
 export const ModelEntrySchema = z.object({
   id: z.string(),
   repoId: z.string(),
@@ -24,10 +38,58 @@ export type ModelEntry = z.infer<typeof ModelEntrySchema>
 
 export const RegistrySchema = z.object({
   version: z.literal(1),
+  /** The chosen default. `null` means none was chosen, and `defaultModelId` decides. */
   default: z.string().nullable(),
   models: z.array(ModelEntrySchema),
 })
 export type Registry = z.infer<typeof RegistrySchema>
+
+/**
+ * The default model's id: the one chosen with `obrew models use` or `obrew login`, else the
+ * built-in one when it is on this machine, else whatever else is. Never absent.
+ *
+ * That last step is what keeps a machine set up with `obrew models pull` alone usable: nothing
+ * was chosen and the built-in model was never downloaded, so the model that IS here is the one
+ * an `exec` should run. It applies only while no choice has been made, so the default still
+ * never depends on pull order once one has.
+ */
+export function defaultModelId(registry: Registry): string {
+  if (registry.default) return registry.default
+  if (registry.models.some((m) => m.id === BUILT_IN_DEFAULT_MODEL)) return BUILT_IN_DEFAULT_MODEL
+  return registry.models[0]?.id ?? BUILT_IN_DEFAULT_MODEL
+}
+
+/** The default model as a host should see it: which one, whether chosen, whether installed. */
+export async function defaultModel(registry: Registry): Promise<{ id: string; chosen: string | null; installed: boolean }> {
+  const id = defaultModelId(registry)
+  const entry = findModel(registry, id)
+  return { id, chosen: registry.default, installed: entry ? await isOnDisk(entry) : false }
+}
+
+/**
+ * Whether this entry's model is on disk as it was downloaded. A missing file, or one of another
+ * size than the bytes that were written, is not the same model and is pulled again.
+ *
+ * `sizeBytes` is stat'd from the finished file, never taken from the Hub's listing: a listing
+ * that is stale, or that advertises no size at all, would otherwise mark a download that
+ * verified against its SHA-256 as incomplete forever. Entries written before that (or by such
+ * a listing) carry 0, and then existence is all there is to check.
+ */
+export async function isOnDisk(entry: ModelEntry): Promise<boolean> {
+  const file = Bun.file(entry.path)
+  if (!(await file.exists())) return false
+  return entry.sizeBytes <= 0 || file.size === entry.sizeBytes
+}
+
+/**
+ * The vision projector this entry can actually use: its recorded path while that file is on
+ * disk, else null. A path that is gone is not vision support — llama-server does not start
+ * when `--mmproj` points at nothing — and `obrew models pull <id>` fetches it again.
+ */
+export async function projectorPath(entry: ModelEntry): Promise<string | null> {
+  if (!entry.mmprojPath) return null
+  return (await Bun.file(entry.mmprojPath).exists()) ? entry.mmprojPath : null
+}
 
 const EMPTY: Registry = { version: 1, default: null, models: [] }
 
@@ -45,12 +107,17 @@ export async function saveRegistry(registry: Registry): Promise<void> {
   await Bun.write(path, JSON.stringify(registry, null, 2) + '\n')
 }
 
-/** Insert or replace by id. The first model installed becomes the default. */
-export async function addModel(entry: ModelEntry): Promise<Registry> {
+/**
+ * Insert or replace by id. A plain `obrew models pull` never touches the chosen default, so it
+ * does not depend on which model happened to be pulled first; `makeDefault` is `obrew login`
+ * and `obrew models use` choosing one, in the same write as the insert so that a concurrent
+ * pull cannot be lost between the two.
+ */
+export async function addModel(entry: ModelEntry, opts: { makeDefault?: boolean } = {}): Promise<Registry> {
   const registry = await loadRegistry()
   registry.models = registry.models.filter((m) => m.id !== entry.id)
   registry.models.push(entry)
-  if (!registry.default) registry.default = entry.id
+  if (opts.makeDefault) registry.default = entry.id
   await saveRegistry(registry)
   return registry
 }
@@ -60,7 +127,10 @@ export async function removeModel(query: string): Promise<ModelEntry> {
   const entry = findModel(registry, query)
   if (!entry) throw new ObrewError('model_missing', `no installed model matches "${query}"`)
   registry.models = registry.models.filter((m) => m.id !== entry.id)
-  if (registry.default === entry.id) registry.default = registry.models[0]?.id ?? null
+  // Removing the chosen default un-chooses it rather than promoting a replacement; what
+  // applies next is `defaultModelId`'s rule, which prefers the built-in model but falls back
+  // to a surviving one, so a machine that still has a model it can run stays usable.
+  if (registry.default === entry.id) registry.default = null
   await saveRegistry(registry)
   await rm(entry.path, { force: true })
   if (entry.mmprojPath) await rm(entry.mmprojPath, { force: true })
@@ -87,17 +157,20 @@ export function findModel(registry: Registry, query: string): ModelEntry | null 
   return null
 }
 
-/** The model an `exec` will run: the query, else the default. Its file must still exist. */
+/** The model an `exec` will run: the query, else the default. It must be on disk. */
 export async function resolveModel(query: string | null | undefined): Promise<ModelEntry> {
   const registry = await loadRegistry()
-  const key = query && query !== 'default' ? query : registry.default
-  if (!key) {
-    throw new ObrewError('model_missing', 'no model installed; run `obrew login` or `obrew models pull <repo>`')
-  }
+  const wantsDefault = !query || query === 'default'
+  const key = wantsDefault ? defaultModelId(registry) : query
   const entry = findModel(registry, key)
-  if (!entry) throw new ObrewError('model_missing', `no installed model matches "${key}"`)
-  if (!(await Bun.file(entry.path).exists())) {
-    throw new ObrewError('model_missing', `model file is missing: ${entry.path}; run \`obrew models pull ${entry.id}\``)
+  if (!entry) {
+    throw new ObrewError(
+      'model_missing',
+      wantsDefault ? `the default model ${key} is not installed; run \`obrew login\`` : `no installed model matches "${key}"`,
+    )
+  }
+  if (!(await isOnDisk(entry))) {
+    throw new ObrewError('model_missing', `model file is missing or incomplete: ${entry.path}; run \`obrew models pull ${entry.id}\``)
   }
   return entry
 }

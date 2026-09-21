@@ -3,7 +3,7 @@
  * FAKE_SCRIPT of replies, one per chat request, and asserts both the events and the request
  * bodies the fake logged (that is where "was this request constrained" is visible).
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -160,6 +160,39 @@ describe('runAgent', () => {
     expect(reqs[2]!.response_format).toMatchObject({ type: 'json_schema' })
     expect(reqs[3]!.response_format).toBeUndefined()
     expect(reqs[3]!.tools).toBeUndefined()
+    // Choose and fill are sampled near-greedy; the free answer keeps the effort temperature.
+    const gen = base(client, builtinRegistry('Read'), []).gen
+    expect(reqs[0]!.temperature).toBe(0.1)
+    expect(reqs[1]!.temperature).toBe(0.1)
+    expect(reqs[3]!.temperature).toBe(gen.temperature)
+    // The choose answer is bounded twice (see REASON_MAX_CHARS); the fill keeps the effort's cap.
+    expect(JSON.stringify(reqs[0]!.response_format)).toContain(
+      '"reason":{"type":"string","maxLength":200}',
+    )
+    expect(reqs[0]!.max_tokens).toBe(512)
+    expect(reqs[1]!.max_tokens).toBe(gen.maxTokens)
+  })
+
+  test('universal: a choose cut off at max_tokens is reported on stderr and answered without a tool', async () => {
+    const client = await start([
+      { text: '{"tool":"Read","reason":"the still shows the still shows the', finish: 'length' },
+      { text: 'final answer' },
+    ])
+    const stderr = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const events: ExecEvent[] = []
+      const result = await runAgent({
+        ...base(client, builtinRegistry('Read'), events),
+        toolMode: 'universal',
+      })
+      expect(result.finalText).toBe('final answer')
+      expect(events.filter((e) => e.type === 'tool.start')).toHaveLength(0)
+      expect(stderr).toHaveBeenCalledWith(
+        '[universal] choose stopped at max_tokens (512) before its JSON closed',
+      )
+    } finally {
+      stderr.mockRestore()
+    }
   })
 
   test('output schema: tools first, then one constrained request whose JSON is the output', async () => {
@@ -179,6 +212,36 @@ describe('runAgent', () => {
     expect(reqs).toHaveLength(3)
     expect(reqs[2]!.response_format).toMatchObject({ type: 'json_schema', json_schema: { schema: { required: ['count'] } } })
     expect(reqs[2]!.tools).toBeUndefined()
+  })
+
+  test('output schema with no tools: the constrained request is the whole turn', async () => {
+    const client = await start([{ text: '{"count":1}' }])
+    const events: ExecEvent[] = []
+    const result = await runAgent({
+      ...base(client, new ToolRegistry(), events),
+      toolMode: 'none',
+      outputSchema: { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'] },
+    })
+    expect(result.output).toEqual({ count: 1 })
+    expect(result.iterations).toBe(1)
+    expect(result.stopReason).toBe('stop')
+    // The constrained answer is the turn's streamed text, so a host reading deltas gets exactly it.
+    expect(events.filter((e) => e.type === 'delta').map((e) => (e as { text: string }).text).join('')).toBe('{"count":1}')
+    expect(result.produced.map((m) => m.role)).toEqual(['assistant'])
+    const reqs = await requests()
+    expect(reqs).toHaveLength(1)
+    expect(reqs[0]!.response_format).toMatchObject({ type: 'json_schema', json_schema: { schema: { required: ['count'] } } })
+    // Straight after the user's own message: no second user turn in a row.
+    expect((reqs[0]!.messages as Array<{ role: string }>).map((m) => m.role)).toEqual(['system', 'user'])
+  })
+
+  test('a grammar with no tools is one request too', async () => {
+    const client = await start([{ text: 'yes' }])
+    const result = await runAgent({ ...base(client, new ToolRegistry(), []), toolMode: 'none', grammar: 'root ::= "yes" | "no"' })
+    expect(result.finalText).toBe('yes')
+    const reqs = await requests()
+    expect(reqs).toHaveLength(1)
+    expect(reqs[0]!.grammar).toBe('root ::= "yes" | "no"')
   })
 
   test('a slow tool hits the per-call timeout and is reported, not fatal', async () => {

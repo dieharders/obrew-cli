@@ -1,9 +1,10 @@
 /**
  * `<data>/config.json` — the few things a user sets once.
  *
- * Model choice is NOT here: the model registry (`models/registry.ts`) owns which model is
- * the default, because that is where a model's existence is known. This file holds what
- * `obrew login` and `obrew engine install` need before any model exists.
+ * Model choice is NOT here: the model registry (`models/registry.ts`) owns which model is the
+ * default and the built-in one to fall back on, because that is where a model's existence is
+ * known. This file holds what `obrew login` and `obrew engine install` need before any model
+ * exists.
  */
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -18,8 +19,6 @@ export const ConfigSchema = z.object({
   variant: z.enum(VARIANTS).optional(),
   /** Hugging Face token for gated repos. `HF_TOKEN` in the environment wins over this. */
   hfToken: z.string().optional(),
-  /** `repo[:file]` that `obrew login` pulls when no model is installed yet. */
-  loginModel: z.string().optional(),
   /** Default context window passed to llama-server. `-c ctx_size=` overrides per run. */
   ctxSize: z.number().int().positive().optional(),
   /** Registry id of the embedding model (`obrew models use --embed <id>`). */
@@ -27,8 +26,6 @@ export const ConfigSchema = z.object({
 })
 export type Config = z.infer<typeof ConfigSchema>
 
-/** A small instruct model with a tools-aware chat template; the owner may change it. */
-export const DEFAULT_LOGIN_MODEL = 'unsloth/Qwen3-4B-GGUF:Qwen3-4B-Q4_K_M.gguf'
 export const DEFAULT_CTX_SIZE = 16384
 
 export async function loadConfig(): Promise<Config> {

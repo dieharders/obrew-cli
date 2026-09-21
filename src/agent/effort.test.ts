@@ -19,6 +19,22 @@ describe('effort', () => {
     expect(requestParams(gen, { constrained: true }).chat_template_kwargs).toEqual({ enable_thinking: false })
   })
 
+  test('a tool call is sampled near-greedy at every effort; a free turn keeps the effort temperature', () => {
+    for (const effort of ['low', 'medium', 'high'] as const) {
+      const gen = generationFor(effort)
+      expect(requestParams(gen, { constrained: true, toolCall: true }).temperature).toBe(0.1)
+      expect(requestParams(gen).temperature).toBe(gen.temperature)
+      // A structured ANSWER (--output-schema) is constrained but not a tool call.
+      expect(requestParams(gen, { constrained: true }).temperature).toBe(gen.temperature)
+    }
+  })
+
+  test('-c tool_temperature overrides, and never exceeds the turn temperature', () => {
+    expect(requestParams(generationFor('medium', { tool_temperature: 0 }), { toolCall: true }).temperature).toBe(0)
+    expect(requestParams(generationFor('medium', { tool_temperature: 0.9 }), { toolCall: true }).temperature).toBe(0.3)
+    expect(requestParams(generationFor('low', { temperature: 0.05 }), { toolCall: true }).temperature).toBe(0.05)
+  })
+
   test('bad values are usage errors', () => {
     expect(() => generationFor('low', { thinking: 'maybe' })).toThrow(/on\|off\|default/)
     expect(() => generationFor('low', { temperature: 'hot' })).toThrow(/number/)

@@ -1,6 +1,6 @@
 {
   "name": "obrew-cli",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Obrew: local AI models as a headless agent CLI.",
   "type": "module",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "bin": {
     "obrew": "./src/main.ts"
   },
-  "llamacpp_tag": "b9080",
+  "llamacpp_tag": "b10937",
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

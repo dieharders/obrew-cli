@@ -22,7 +22,8 @@ bun run dev exec resume <id> "again"   # continue a session
 ```
 obrew exec [resume <sessionId>] [--json] [--model <id>] [--effort low|medium|high]
            [-c key=value ...] [--cwd <dir>] [--system-prompt <t> | --system-prompt-file <p>]
-           [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none] "<prompt>"
+           [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none]
+           ("<prompt>" | --input-format json)
 obrew auth status [--json]
 obrew login [--model <repo[:file]>] [--json]
 obrew models list|pull <repo>[:file] [--mmproj]|rm <id>|use <id>
@@ -34,6 +35,24 @@ Every run-time knob is also a `-c key=value` pair (`thinking`, `max_tokens`, `te
 `ctx_size`, `n_gpu_layers`, `tool_mode`, ...), so `exec` and `exec resume` accept the identical
 flag set.
 
+A host driving `exec` should pass the turn's text on stdin rather than in argv: with
+`--input-format json`, `exec` reads one JSON object, `{"prompt": "...", "systemPrompt": "...",
+"outputSchema": {...}}` (`systemPrompt` and `outputSchema` optional), and then EOF. That keeps
+a long prompt, or a large schema, clear of the ~32 KB Windows allows for a whole command line,
+and nothing has to be written to a temp file.
+
+## Which model runs
+
+`exec` with no `--model` runs the default: the one chosen with `obrew models use <id>`, else
+the built-in Gemma 4 E2B when the machine has it, else whatever else it has — so a machine set
+up with `obrew models pull` alone still runs. A plain pull never takes the default away from a
+model that already holds it, and removing the default falls back to a model that is left rather
+than to one that was never downloaded. `obrew models list` marks the default with `*`, and
+`obrew auth status` reports it and whether it is installed.
+
+`obrew login` installs that same default, so a choice survives the next login instead of being
+replaced by the built-in model; `login --model <repo[:file]>` names one and makes it the default.
+
 ## Tools are constrained, always
 
 The model never emits free-form tool JSON. With a chat template that knows about tools
@@ -44,8 +63,10 @@ each decoded under a JSON schema. Either way the arguments are validated against
 schema before it runs, and an invalid call is repaired once under that schema. A failing tool
 is reported back to the model as a result; it never ends the run.
 
-`--output-schema '{...}'` (or `@file.json`) decodes the final answer under a schema and puts the
-parsed value on `turn.completed.output`; `--grammar @file.gbnf` does the same with GBNF.
+`--output-schema '{...}'` (or `@file.json`, or `outputSchema` on stdin) decodes the final answer
+under a schema and puts the parsed value on `turn.completed.output`; `--grammar @file.gbnf` does
+the same with GBNF. With tools available the model may use them first and only the answer is
+constrained; with `--tools none` the constrained request is the whole turn.
 
 ## MCP servers
 
@@ -62,10 +83,18 @@ replaces it, and an engine idle for ten minutes is stopped by the next run. `--e
 (or `OBREW_ENGINE=ephemeral`) loads and unloads per run. `obrew engine status|start|stop`
 inspect and control it.
 
+On Windows the engine runs with no console window; its log is in the data directory, and
+`obrew engine log` prints the tail. To watch it live instead, pass `-c engine_console=true` to
+the `exec` or `engine start` that starts it: that engine gets a console window of its own
+(closing the window stops the engine). A warm engine keeps whatever it started with, so run
+`obrew engine stop` first to switch.
+
 `obrew serve --port 8008` fronts the same engine with an OpenAI-compatible API:
 `/v1/chat/completions`, `/v1/completions`, `/v1/models`, plus `/obrew/status`, `/obrew/models`
-and `POST /obrew/models/pull` (SSE progress). The `model` field picks the model and swaps the
-engine when it differs.
+and `POST /obrew/models/pull` (SSE progress), which installs a model the way `obrew models pull`
+does and leaves the default alone — `POST /obrew/models/default {"id": "<model id>"}` is
+`obrew models use` for when a host wants to move it. The `model` field picks the model and
+swaps the engine when it differs.
 
 ## Vision, search, embeddings
 

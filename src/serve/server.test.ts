@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
 import { stopShared } from '../engine/shared'
-import { saveRegistry } from '../models/registry'
+import { loadRegistry, saveRegistry } from '../models/registry'
 import { ObrewServer } from './server'
 
 describe('obrew serve', () => {
@@ -83,6 +83,70 @@ describe('obrew serve', () => {
     })
     expect(missing.status).toBe(404)
     expect((await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: 'x' })).status).toBe(400)
+  })
+
+  test('/obrew/models/pull installs a model with SSE progress and leaves the default alone', async () => {
+    // A one-file fake Hub, just enough for a pull.
+    const bytes = new Uint8Array(2000).fill(5)
+    const sha256 = new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
+    const hub = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(req) {
+        const { pathname } = new URL(req.url)
+        if (pathname === '/api/models/o/r/tree/main') {
+          return Response.json([{ type: 'file', path: 'c.gguf', size: bytes.length, lfs: { oid: sha256, size: bytes.length } }])
+        }
+        if (pathname === '/o/r/resolve/main/c.gguf') return new Response(bytes, { headers: { 'content-length': String(bytes.length) } })
+        return new Response('nf', { status: 404 })
+      },
+    })
+    process.env.HF_ENDPOINT = `http://127.0.0.1:${hub.port}`
+    try {
+      const pull = (body: unknown) =>
+        fetch(`${base}/obrew/models/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      expect((await pull({})).status).toBe(400)
+      const res = await pull({ spec: 'o/r:c.gguf' })
+      expect(res.headers.get('content-type')).toContain('text/event-stream')
+      const text = await res.text()
+      expect(text).toContain('"type":"download.done"')
+      expect(text).toContain('"ok":true')
+      const registry = (await (await fetch(`${base}/obrew/models`)).json()) as { default: string; models: Array<{ id: string }> }
+      expect(registry.models.map((m) => m.id)).toEqual(['o/r:a.gguf', 'o/r:b.gguf', 'o/r:c.gguf'])
+      expect(registry.default).toBe('o/r:a.gguf')
+    } finally {
+      hub.stop(true)
+      delete process.env.HF_ENDPOINT
+    }
+  })
+
+  test('/obrew/models/default is `obrew models use` over HTTP', async () => {
+    const setDefault = (body: unknown) =>
+      fetch(`${base}/obrew/models/default`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await setDefault({})).status).toBe(400)
+    expect((await setDefault({ id: 'o/r:nope.gguf' })).status).toBe(404)
+    const res = await setDefault({ id: 'o/r:b.gguf' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ default: 'o/r:b.gguf' })
+    const status = (await (await fetch(`${base}/obrew/status`)).json()) as { default: string; chosen: string | null }
+    expect(status).toMatchObject({ default: 'o/r:b.gguf', chosen: 'o/r:b.gguf' })
+  })
+
+  test('/obrew/status and /obrew/models give the same answer when no default was chosen', async () => {
+    await saveRegistry({ ...(await loadRegistry()), default: null })
+    type View = { default: string; chosen: string | null; defaultInstalled: boolean }
+    const status = (await (await fetch(`${base}/obrew/status`)).json()) as View
+    const models = (await (await fetch(`${base}/obrew/models`)).json()) as View
+    // Not null and not the built-in model this machine has never downloaded: the model a
+    // completion with no `model` would actually run, reported the same way by both routes.
+    expect(status).toMatchObject({ default: 'o/r:a.gguf', chosen: null, defaultInstalled: true })
+    expect(models).toMatchObject({ default: 'o/r:a.gguf', chosen: null, defaultInstalled: true })
+    const res = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(res.status).toBe(200)
   })
 
   test('/v1/embeddings answers in the OpenAI shape once an embedding model is set', async () => {

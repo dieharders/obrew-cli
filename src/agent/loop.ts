@@ -13,7 +13,8 @@
  *     no tool calls → done
  *     run each call → append {role:'tool'} → continue
  *   --output-schema: one final constrained request, tools off (a schema and `tools` never
- *                    share a request), whose JSON becomes `turn.completed.output`.
+ *                    share a request), whose JSON becomes `turn.completed.output`. With no
+ *                    tools at all, that request IS the turn and the loop never runs.
  */
 import type { EngineClient } from '../engine/client'
 import { ObrewError } from '../shared/errors'
@@ -95,6 +96,11 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
   let stopReason: AgentResult['stopReason'] = 'stop'
   let iterations = 0
   const useTools = opts.toolMode !== 'none' && opts.registry.size > 0
+  // A schema- or grammar-bound answer with no tools to call is ONE request: the constrained
+  // one, straight after the user's message. Running the loop first only produced a free draft
+  // of the same answer that the constrained request then replaced, so a host asking for
+  // structured output paid for every answer twice.
+  const answerOnly = !useTools && Boolean(opts.outputSchema || opts.grammar)
   const toolCtx: ToolContext = { ...opts.toolContext, signal: opts.signal }
 
   const addUsage = (u: TurnResult['usage']) => {
@@ -122,7 +128,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
   let lastSignature: string | null = null
   let forcePlainTurn = false
 
-  for (;;) {
+  while (!answerOnly) {
     if (iterations >= opts.maxIterations) {
       stopReason = 'max_iterations'
       break
@@ -196,16 +202,21 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
 
   let output: unknown
   if (opts.outputSchema || opts.grammar) {
-    // A user turn closes the transcript before the constrained request. The model's own text
-    // may be the last message here, and a chat template asked to continue after an assistant
-    // turn is exactly the case llama.cpp's grammar + reasoning handling trips over
-    // ("empty grammar stack after accepting piece: <think>").
-    push({
-      role: 'user',
-      content: opts.outputSchema
-        ? 'Now give the final answer as JSON that matches the required schema, and nothing else.'
-        : 'Now give the final answer in the required format, and nothing else.',
-    })
+    if (!answerOnly) {
+      // A user turn closes the transcript before the constrained request. The model's own text
+      // may be the last message here, and a chat template asked to continue after an assistant
+      // turn is exactly the case llama.cpp's grammar + reasoning handling trips over
+      // ("empty grammar stack after accepting piece: <think>").
+      //
+      // Only after the loop: with no loop the user's own message is already last, and a second
+      // user turn in a row is an error in templates that require roles to alternate.
+      push({
+        role: 'user',
+        content: opts.outputSchema
+          ? 'Now give the final answer as JSON that matches the required schema, and nothing else.'
+          : 'Now give the final answer in the required format, and nothing else.',
+      })
+    }
     const turn = await runTurn({
       ...turnBase,
       messages,
@@ -215,6 +226,10 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
     addUsage(turn.usage)
     push(turn.message)
     finalText = turn.message.content ?? ''
+    if (answerOnly) {
+      iterations = 1
+      stopReason = turn.finishReason === 'length' ? 'length' : 'stop'
+    }
     if (opts.outputSchema) {
       try {
         output = JSON.parse(finalText)
@@ -280,6 +295,7 @@ async function executeCall(
       ],
       extra: jsonSchemaBody(tool.inputSchema),
       constrained: true,
+      toolCall: true,
     })
     args = parseArgs(repair.message.content ?? '')
     violations = args ? validate(args, tool.inputSchema) : violations
