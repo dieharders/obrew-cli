@@ -324,4 +324,98 @@ describe('runAgent repeat guard', () => {
     expect(last.content).toMatch(/repeated the same tool call/)
     expect(result.produced.filter((m) => m.role === 'user')).toHaveLength(1)
   })
+
+  /** A registry of counting tools: `build` changes things, `lint` only looks. */
+  const counting = () => {
+    const runs: string[] = []
+    const registry = new ToolRegistry()
+    const tool = (name: string, readOnly: boolean): Tool => ({
+      name,
+      description: name,
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+      ...(readOnly ? { readOnly: true } : {}),
+      execute: async (args) => {
+        runs.push(`${name}:${String(args.id ?? '')}`)
+        return { content: `${name} OK` }
+      },
+    })
+    registry.add(tool('build', false))
+    registry.add(tool('lint', true))
+    return { registry, runs }
+  }
+
+  const run = async (script: unknown[], registry: ToolRegistry) => {
+    const port = await freePort()
+    server = await LlamaServer.start({
+      command: [process.execPath, FAKE_SERVER],
+      args: ['-m', 'fake', '--port', String(port)],
+      port,
+      model: 'fake',
+      env: { FAKE_SCRIPT: JSON.stringify(script), FAKE_LOG_REQUESTS: requestLog },
+      logPath: null,
+    })
+    const events: ExecEvent[] = []
+    const result = await runAgent({
+      client: server.client,
+      messages: [{ role: 'user', content: 'build it' }],
+      gen: generationFor('low'),
+      registry,
+      toolMode: 'native',
+      toolContext: { cwd, signal: new AbortController().signal },
+      maxIterations: 10,
+      signal: new AbortController().signal,
+      emit: (e) => events.push(e),
+    })
+    return { result, events }
+  }
+
+  // The motionbuff case: build → lint ("OK") → the same build. The lint in between used to hide
+  // the repeat from a guard that only looked one call back.
+  test('a repeat is caught across a read-only call, and is not run or reported a second time', async () => {
+    const { registry, runs } = counting()
+    const { result, events } = await run(
+      [
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { toolCalls: [{ name: 'lint', arguments: {} }] },
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { text: 'done' },
+      ],
+      registry,
+    )
+    expect(runs).toEqual(['build:s-01', 'lint:'])
+    expect(events.filter((e) => e.type === 'tool.start')).toHaveLength(2)
+    expect(result.finalText).toBe('done')
+    const skipped = result.produced.filter((m) => m.role === 'tool').at(-1)!
+    expect(skipped.content).toMatch(/^Not run again/)
+    expect(skipped.content).toContain('build OK')
+    const reqs = (await readFile(requestLog, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>)
+    expect(reqs.at(-1)!.tools).toBeUndefined()
+  })
+
+  test('the same check after a real change is a new check: lint → build → lint runs both lints', async () => {
+    const { registry, runs } = counting()
+    await run(
+      [
+        { toolCalls: [{ name: 'lint', arguments: {} }] },
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { toolCalls: [{ name: 'lint', arguments: {} }] },
+        { text: 'done' },
+      ],
+      registry,
+    )
+    expect(runs).toEqual(['lint:', 'build:s-01', 'lint:'])
+  })
+
+  test('the same tool with different arguments is not a repeat', async () => {
+    const { registry, runs } = counting()
+    await run(
+      [
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { toolCalls: [{ name: 'build', arguments: { id: 's-02' } }] },
+        { text: 'done' },
+      ],
+      registry,
+    )
+    expect(runs).toEqual(['build:s-01', 'build:s-02'])
+  })
 })

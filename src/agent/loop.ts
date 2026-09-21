@@ -123,9 +123,18 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
   }
 
   // A small model can re-issue the identical call forever, each time getting the identical
-  // result. That is not progress; after one repeat the loop tells it so and takes the tools
+  // result. That is not progress; at the first repeat the loop tells it so and takes the tools
   // away for one turn, which yields an answer instead of burning the iteration cap.
-  let lastSignature: string | null = null
+  //
+  // `standing` holds every call whose result still stands: call → result. A read-only call
+  // leaves the others standing; any other call may have changed what they saw, so it clears
+  // them (lint → edit → lint is two real lints). Comparing only with the PREVIOUS call, as this
+  // once did, missed the commonest repeat there is: in one motionbuff job Gemma 4 E2B went
+  // build_slide → lint ("checks OK") → the same build_slide → the same build_slide on three of
+  // five slides, and only the last of those was caught — a choose + fill round (10–20 s) wasted
+  // per slide. The repeat is not run again: nothing has changed, so its result is the one it
+  // already has, and a host counting tool events must not see a second write that never was.
+  const standing = new Map<string, string>()
   let forcePlainTurn = false
 
   while (!answerOnly) {
@@ -173,12 +182,22 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
       break
     }
 
-    const signature = JSON.stringify(calls.map((c) => [c.function.name, c.function.arguments]))
-    const repeated = signature === lastSignature
-    lastSignature = signature
-
+    let repeated = false
     for (const call of calls) {
+      const signature = JSON.stringify([call.function.name, call.function.arguments])
+      const prior = standing.get(signature)
+      if (prior !== undefined) {
+        repeated = true
+        push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: `Not run again: this exact call was already made and nothing has changed since. Its result was:\n${prior}`,
+        })
+        continue
+      }
       const result = await executeCall(call, messages, opts, toolCtx)
+      if (opts.registry.get(call.function.name)?.readOnly !== true) standing.clear()
+      standing.set(signature, result.content)
       push({ role: 'tool', tool_call_id: call.id, content: result.content })
       if (result.images?.length) {
         // The images ride in a user message (tool results are text on the wire). The
@@ -193,7 +212,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
       push({
         role: 'user',
         content:
-          'You repeated the same tool call with the same arguments; its result is unchanged and is shown above. ' +
+          'You repeated the same tool call with the same arguments; nothing has changed since, and its result is shown above. ' +
           'Do not call tools again. Answer the request now from what you have.',
       })
       forcePlainTurn = true

@@ -124,6 +124,7 @@ export class McpClient {
         name: `mcp__${this.name}__${info.name}`,
         description: info.description ?? `${info.name} on ${this.name}`,
         inputSchema: schema,
+        ...(info.annotations?.readOnlyHint === true ? { readOnly: true } : {}),
         timeoutMs: MCP_TOOL_TIMEOUT_MS,
         execute: async (callArgs, ctx) => {
           const result = await this.callTool(info.name, callArgs, ctx.signal)

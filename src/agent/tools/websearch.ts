@@ -72,6 +72,7 @@ export async function searchWeb(query: string, maxResults = 5, signal?: AbortSig
 export const webSearchTool: Tool = {
   name: 'WebSearch',
   description: 'Search the web. Returns titles, URLs and snippets for the top results.',
+  readOnly: true,
   inputSchema: {
     type: 'object',
     properties: {

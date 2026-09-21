@@ -14,6 +14,7 @@ export const globTool: Tool = {
   description:
     'List files matching a glob pattern (e.g. "**/*.ts", "src/*.json") under the working ' +
     'directory or a sub-directory. Returns relative paths, sorted.',
+  readOnly: true,
   inputSchema: {
     type: 'object',
     properties: {

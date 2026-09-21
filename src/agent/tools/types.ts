@@ -37,6 +37,12 @@ export interface Tool {
   description: string
   /** JSON Schema for the arguments, always an object schema. */
   inputSchema: JsonSchema
+  /**
+   * The tool changes nothing: calling it cannot make an earlier call's result stale. Only `true`
+   * means anything — absent is "unknown", which the loop's repeat guard treats as a tool that
+   * may change things. An MCP tool says so with `annotations.readOnlyHint`.
+   */
+  readOnly?: boolean
   /** Per-call cap for this tool, when the run's default is too short (remote tools). */
   timeoutMs?: number
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutput>
