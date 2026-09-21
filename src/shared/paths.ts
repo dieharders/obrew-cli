@@ -10,6 +10,8 @@
  *   models/<org>--<repo>/        .gguf files, flat; models.json is the index
  *   sessions/<id>.jsonl          exec transcripts, for `exec resume`
  *   engine/running/<pid>.json    live llama-server records, for the orphan reaper
+ *   needle/<rev>/                the tool model: needle3.cact and its runner
+ *   engine/needle/<key>.json     warm needle side-cars, one per toolset
  *   logs/                        llama-server.log
  *   config.json  models.json
  */
@@ -33,6 +35,8 @@ export function dataDir(): string {
 
 export const enginesDir = () => join(dataDir(), 'engines')
 export const modelsDir = () => join(dataDir(), 'models')
+export const needleDir = () => join(dataDir(), 'needle')
+export const needleRecordsDir = () => join(dataDir(), 'engine', 'needle')
 export const sessionsDir = () => join(dataDir(), 'sessions')
 export const runningDir = () => join(dataDir(), 'engine', 'running')
 export const logsDir = () => join(dataDir(), 'logs')

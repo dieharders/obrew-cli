@@ -23,6 +23,8 @@ export const ConfigSchema = z.object({
   ctxSize: z.number().int().positive().optional(),
   /** Registry id of the embedding model (`obrew models use --embed <id>`). */
   embedModel: z.string().optional(),
+  /** The tool model: `needle3`, `none`, or a path to a `.cact` (`obrew models use --tool <v>`). */
+  toolModel: z.string().optional(),
 })
 export type Config = z.infer<typeof ConfigSchema>
 

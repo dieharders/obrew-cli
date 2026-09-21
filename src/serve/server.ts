@@ -12,6 +12,7 @@
  * Loopback by default; there is no auth, on the same reasoning as the MCP endpoints obrew
  * dials: the reachable set is this machine's processes.
  */
+import { toolModelStatus } from '../needle/resolve'
 import { launchArgs, loadOptionsFrom } from '../engine/flags'
 import { engineStatus, requireEngine } from '../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../engine/shared'
@@ -229,6 +230,7 @@ export class ObrewServer {
       const model = await defaultModel(await loadRegistry())
       return json({
         engine: status,
+        toolModel: await toolModelStatus(),
         loaded: this.loaded?.id ?? null,
         port: this.engine?.port ?? null,
         default: model.id,

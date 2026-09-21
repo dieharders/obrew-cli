@@ -5,12 +5,16 @@
  * the one named) is on disk and make it the default. The default is whichever model the user or
  * a host chose, and the built-in one on a fresh install, so a choice survives the next login
  * rather than being replaced by the built-in model. It is downloaded when missing or not the
- * same file; that one model is all login downloads. This is what a host's "Sign in" button
- * runs, in a real terminal so the progress is visible.
+ * same file; that one model is all login downloads — beside the 36 MB tool model (needle/),
+ * whose failure to install is reported and is never a failed login: a run without it still
+ * runs. This is what a host's "Sign in" button runs, in a real terminal so the progress is
+ * visible.
  */
 import { pullModel } from '../../models/pull'
 import { defaultModelId, loadRegistry } from '../../models/registry'
 import { findEngine, installEngine } from '../../engine/install'
+import { installNeedle } from '../../needle/install'
+import { resolveToolModel } from '../../needle/resolve'
 import { hfToken, loadConfig, VARIANTS } from '../../shared/config'
 import { track, untrack } from '../../shared/proc'
 import { oneOf, parse } from '../args'
@@ -66,6 +70,20 @@ export async function runLogin(argv: string[]): Promise<number> {
       onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
     })
     log(`default model: ${entry.id}`)
+
+    if ((await resolveToolModel(undefined, config)).id !== 'none') {
+      try {
+        await installNeedle({
+          token: hfToken(config),
+          signal: controller.signal,
+          onLog: log,
+          onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
+        })
+      } catch (err) {
+        if (controller.signal.aborted) throw err
+        log(`tool model not installed (${err instanceof Error ? err.message : String(err)}); runs will use the default model alone`)
+      }
+    }
 
     out.event({ type: 'setup.done', ok: true, message: 'obrew is ready' })
     return 0

@@ -14,7 +14,8 @@ const HELP = `obrew models list [--json]
 obrew models pull <org/repo[:file.gguf]> [--mmproj] [--mmproj-file <name>] [--json]
 obrew models rm <id>
 obrew models use <id>            make it the default chat model
-obrew models use --embed <id>    make it the embedding model`
+obrew models use --embed <id>    make it the embedding model
+obrew models use --tool needle3|none|<path.cact>   choose the tool model (OBREW_TOOL_MODEL wins)`
 
 export async function runModels(argv: string[]): Promise<number> {
   const { values, positionals } = parse(argv, {
@@ -23,6 +24,7 @@ export async function runModels(argv: string[]): Promise<number> {
     mmproj: { type: 'boolean', default: false },
     'mmproj-file': { type: 'string' },
     embed: { type: 'boolean', default: false },
+    tool: { type: 'boolean', default: false },
   } as const)
   if (values.help) {
     console.log(HELP)
@@ -94,6 +96,12 @@ export async function runModels(argv: string[]): Promise<number> {
     }
     case 'use': {
       if (!arg) throw new UsageError('use needs a model id')
+      if (values.tool) {
+        // Not a registry id: the tool model is not a GGUF and is not pulled (see needle/install.ts).
+        await saveConfig({ ...(await loadConfig()), toolModel: arg })
+        console.log(`tool model: ${arg}`)
+        return 0
+      }
       if (values.embed) {
         const registry = await loadRegistry()
         const entry = findModel(registry, arg)
