@@ -134,7 +134,19 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
   // five slides, and only the last of those was caught — a choose + fill round (10–20 s) wasted
   // per slide. The repeat is not run again: nothing has changed, so its result is the one it
   // already has, and a host counting tool events must not see a second write that never was.
-  const standing = new Map<string, string>()
+  //
+  // A FAILED call stands only once it has failed the same way twice: a timeout or a dropped
+  // connection deserves its retry, and the same error a second time is an answer.
+  const standing = new Map<string, CallResult>()
+  const failing = new Map<string, string>()
+  // The images ride in a user message (tool results are text on the wire). The transcript
+  // keeps a marker instead of the base64, as `exec --image` does.
+  const pushImages = (name: string, images: CallResult['images']) => {
+    if (!images?.length) return
+    const label = `Image from ${name}:`
+    messages.push({ role: 'user', content: [{ type: 'text', text: label }, ...images] })
+    produced.push({ role: 'user', content: `${label} [image]` })
+  }
   let forcePlainTurn = false
 
   while (!answerOnly) {
@@ -191,21 +203,20 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
         push({
           role: 'tool',
           tool_call_id: call.id,
-          content: `Not run again: this exact call was already made and nothing has changed since. Its result was:\n${prior}`,
+          content: `Not run again: this exact call was already made and nothing has changed since. Its result was:\n${prior.content}`,
         })
+        pushImages(call.function.name, prior.images)
         continue
       }
       const result = await executeCall(call, messages, opts, toolCtx)
-      if (opts.registry.get(call.function.name)?.readOnly !== true) standing.clear()
-      standing.set(signature, result.content)
-      push({ role: 'tool', tool_call_id: call.id, content: result.content })
-      if (result.images?.length) {
-        // The images ride in a user message (tool results are text on the wire). The
-        // transcript keeps a marker instead of the base64, as `exec --image` does.
-        const label = `Image from ${call.function.name}:`
-        messages.push({ role: 'user', content: [{ type: 'text', text: label }, ...result.images] })
-        produced.push({ role: 'user', content: `${label} [image]` })
+      if (opts.registry.get(call.function.name)?.readOnly !== true) {
+        standing.clear()
+        failing.clear()
       }
+      if (result.ok || failing.get(signature) === result.content) standing.set(signature, result)
+      else failing.set(signature, result.content)
+      push({ role: 'tool', tool_call_id: call.id, content: result.content })
+      pushImages(call.function.name, result.images)
     }
 
     if (repeated) {
@@ -262,6 +273,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
 }
 
 interface CallResult {
+  ok: boolean
   content: string
   images?: ToolOutput['images']
 }
@@ -286,7 +298,7 @@ async function executeCall(
       bytes: Buffer.byteLength(content),
       ...(opts.includeToolIo ? { output: content } : {}),
     })
-    return { content, images }
+    return { ok, content, images }
   }
 
   if (!tool) {

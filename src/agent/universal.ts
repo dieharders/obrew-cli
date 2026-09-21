@@ -100,15 +100,24 @@ const FILL_SCHEMA_MAX_CHARS = 6_000
 
 type Json = Record<string, unknown>
 
-/** The `$defs` a schema actually points at, so a branch carries its own and no one else's. */
-function referencedDefs(node: unknown, defs: Json, found: Json = {}): Json {
+const DEFS_KEYS = ['$defs', 'definitions'] as const
+type Defs = Record<(typeof DEFS_KEYS)[number], Json>
+
+/**
+ * The definitions a schema actually points at, so a branch carries its own and no one else's.
+ * Both spellings are followed: `$defs`, and the `definitions` of draft-07 and before.
+ */
+function referencedDefs(node: unknown, defs: Defs, found: Defs = { $defs: {}, definitions: {} }): Defs {
   if (Array.isArray(node)) for (const item of node) referencedDefs(item, defs, found)
   else if (node && typeof node === 'object') {
     for (const [key, value] of Object.entries(node)) {
-      const name = key === '$ref' && typeof value === 'string' ? /^#\/\$defs\/(.+)$/.exec(value)?.[1] : undefined
-      if (name !== undefined && name in defs && !(name in found)) {
-        found[name] = defs[name]
-        referencedDefs(defs[name], defs, found)
+      const ref = key === '$ref' && typeof value === 'string' ? /^#\/(\$defs|definitions)\/(.+)$/.exec(value) : null
+      const where = ref?.[1] as keyof Defs | undefined
+      const name = ref?.[2]
+      if (where && name !== undefined && name in defs[where]) {
+        if (name in found[where]) continue
+        found[where][name] = defs[where][name]
+        referencedDefs(defs[where][name], defs, found)
       } else referencedDefs(value, defs, found)
     }
   }
@@ -126,12 +135,19 @@ export function discriminatedUnion(schema: JsonSchema): { key: string; branches:
     Object.entries((branch.properties ?? {}) as Record<string, Json>).filter(([, p]) => p && typeof p.const === 'string')
   const key = constsOf(union[0]!).find(([k]) => union.every((b) => constsOf(b).some(([bk]) => bk === k)))?.[0]
   if (!key) return null
-  const defs = (schema.$defs ?? {}) as Json
+  const defs: Defs = { $defs: (schema.$defs ?? {}) as Json, definitions: (schema.definitions ?? {}) as Json }
+  // What sits beside the union holds for every branch of it: shared properties and required
+  // fields, `type`, `additionalProperties`. A branch is filled alone, so it takes them with it.
+  const { anyOf: _anyOf, oneOf: _oneOf, $defs: _defs, definitions: _definitions, ...shared } = schema as Json
   const branches = new Map<string, JsonSchema>()
   for (const branch of union) {
     const value = (branch.properties as Record<string, Json>)[key]!.const as string
-    const own = referencedDefs(branch, defs)
-    branches.set(value, Object.keys(own).length > 0 ? { ...branch, $defs: own } : branch)
+    const whole: Json = { ...shared, ...branch }
+    if (shared.properties) whole.properties = { ...(shared.properties as Json), ...(branch.properties as Json) }
+    if (shared.required) whole.required = [...new Set([...(shared.required as string[]), ...((branch.required ?? []) as string[])])]
+    const own = referencedDefs(whole, defs)
+    for (const where of DEFS_KEYS) if (Object.keys(own[where]).length > 0) whole[where] = own[where]
+    branches.set(value, whole as JsonSchema)
   }
   return branches.size === union.length ? { key, branches } : null
 }

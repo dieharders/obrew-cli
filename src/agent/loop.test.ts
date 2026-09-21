@@ -233,6 +233,26 @@ describe('runAgent', () => {
     expect(discriminatedUnion({ type: 'object', properties: { a: { type: 'string' } } })).toBeNull()
   })
 
+  test('universal: a branch keeps what sits beside the union, and follows draft-07 definitions', () => {
+    const union = discriminatedUnion({
+      type: 'object',
+      properties: { id: { $ref: '#/definitions/id' } },
+      required: ['id'],
+      definitions: { id: { type: 'string' }, unused: { type: 'number' } },
+      oneOf: [
+        { properties: { kind: { const: 'a' }, n: { type: 'number' } }, required: ['kind'] },
+        { properties: { kind: { const: 'b' } }, required: ['kind'] },
+      ],
+    })!
+    expect(union.key).toBe('kind')
+    expect(union.branches.get('a')).toEqual({
+      type: 'object',
+      properties: { id: { $ref: '#/definitions/id' }, kind: { const: 'a' }, n: { type: 'number' } },
+      required: ['id', 'kind'],
+      definitions: { id: { type: 'string' } },
+    })
+  })
+
   test('universal: a choose cut off at max_tokens is reported on stderr and answered without a tool', async () => {
     const client = await start([
       { text: '{"tool":"Read","reason":"the still shows the still shows the', finish: 'length' },
@@ -464,6 +484,38 @@ describe('runAgent repeat guard', () => {
       registry,
     )
     expect(runs).toEqual(['lint:', 'build:s-01', 'lint:'])
+  })
+
+  test('a failed call may be retried; failing the same way twice is what stands', async () => {
+    const registry = new ToolRegistry()
+    let runs = 0
+    registry.add({
+      name: 'fetch',
+      description: 'fetch',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => (++runs === 1 ? { content: 'Error: timed out', isError: true } : { content: 'fetched' }),
+    })
+    const call = { toolCalls: [{ name: 'fetch', arguments: {} }] }
+    const { result } = await run([call, call, call, { text: 'done' }], registry)
+    expect(runs).toBe(2)
+    const tools = result.produced.filter((m) => m.role === 'tool').map((m) => m.content)
+    expect(tools[1]).toBe('fetched')
+    expect(tools[2]).toMatch(/^Not run again/)
+  })
+
+  test('a skipped repeat shows its images again', async () => {
+    const registry = new ToolRegistry()
+    registry.add({
+      name: 'look',
+      description: 'look',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => ({ content: 'a still', images: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }),
+    })
+    const call = { toolCalls: [{ name: 'look', arguments: {} }] }
+    const { result } = await run([call, call, { text: 'done' }], registry)
+    expect(result.produced.filter((m) => m.content === 'Image from look: [image]')).toHaveLength(2)
   })
 
   test('the same tool with different arguments is not a repeat', async () => {
