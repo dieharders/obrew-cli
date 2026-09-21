@@ -5,7 +5,8 @@
  * the one named) is on disk and make it the default. The default is whichever model the user or
  * a host chose, and the built-in one on a fresh install, so a choice survives the next login
  * rather than being replaced by the built-in model. It is downloaded when missing or not the
- * same file; that one model is all login downloads. This is what a host's "Sign in" button
+ * same file; that one model is all login downloads, along with its vision projector when its
+ * repo publishes one (`--no-mmproj` skips that; `--mmproj` insists on one and fails without). This is what a host's "Sign in" button
  * runs, in a real terminal so the progress is visible.
  */
 import { pullModel } from '../../models/pull'
@@ -23,9 +24,11 @@ export async function runLogin(argv: string[]): Promise<number> {
     model: { type: 'string' },
     variant: { type: 'string' },
     mmproj: { type: 'boolean', default: false },
+    // Its own boolean: `parse` is strict, and parseArgs derives no `--no-` form by itself.
+    'no-mmproj': { type: 'boolean', default: false },
   } as const)
   if (values.help) {
-    console.log('obrew login [--model <repo[:file]>] [--mmproj] [--variant cuda|cpu|vulkan|metal] [--json]')
+    console.log('obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--variant cuda|cpu|vulkan|metal] [--json]')
     return 0
   }
   const out = createOutput(values.json)
@@ -53,12 +56,16 @@ export async function runLogin(argv: string[]): Promise<number> {
     }
 
     // The model is fetched whenever this machine does not have it on disk as downloaded, and
-    // pullModel fetches nothing when it does. No other model is looked at. `makeDefault` is
+    // pullModel fetches nothing when it does. No other model is looked at. A projector comes
+    // with it wherever the repo publishes one, because a host's setup button runs a bare `obrew
+    // login` and cannot pass the strict `--mmproj` without failing a text-only default. An
+    // installed model that was never checked for one costs a single listing request. `makeDefault` is
     // applied in the same registry write as the install, so a pull running against `obrew
     // serve` at that moment cannot be lost between the two.
     const entry = await pullModel({
       spec: values.model ?? defaultModelId(await loadRegistry()),
       mmproj: values.mmproj,
+      mmprojIfPublished: !values['no-mmproj'],
       makeDefault: true,
       token: hfToken(config),
       signal: controller.signal,

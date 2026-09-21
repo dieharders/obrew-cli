@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
+import { authStatus } from '../cli/commands/auth'
 import { runLogin } from '../cli/commands/login'
 import { modelId, parseModelSpec } from './hf'
 import { pullModel } from './pull'
@@ -191,6 +192,9 @@ describe('pullModel', () => {
       }
     }
 
+    /** One listing and one projector download: what login costs a model that is already here. */
+    const PROJECTOR_ONLY = ['GET /api/models/org/repo/tree/main', 'GET /org/repo/resolve/main/mmproj-F16.gguf']
+
     test('a fresh install gets the built-in default, set as the default', async () => {
       expect(await login()).toBe(0)
       const registry = await loadRegistry()
@@ -211,7 +215,8 @@ describe('pullModel', () => {
       const pulled = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
       requests = []
       expect(await login()).toBe(0)
-      expect(requests).toEqual([])
+      // Its repo publishes a projector, so that is fetched — and nothing else is.
+      expect(requests).toEqual(PROJECTOR_ONLY)
       const registry = await loadRegistry()
       expect(registry.default).toBe(pulled.id)
       expect(registry.models.map((m) => m.id)).toEqual([pulled.id])
@@ -233,7 +238,8 @@ describe('pullModel', () => {
       await setDefault(chosen.id)
       requests = []
       expect(await login()).toBe(0)
-      expect(requests).toEqual([])
+      // Its repo publishes a projector, so that is fetched — and nothing else is.
+      expect(requests).toEqual(PROJECTOR_ONLY)
       const registry = await loadRegistry()
       expect(registry.default).toBe(chosen.id)
       expect(registry.models.map((m) => m.id)).toEqual([chosen.id])
@@ -248,6 +254,83 @@ describe('pullModel', () => {
       const registry = await loadRegistry()
       expect(registry.default).toBe(chosen.id)
       expect(registry.models.map((m) => m.id)).toEqual([chosen.id])
+    })
+
+    test('a fresh login of a vision model fetches its projector with it', async () => {
+      expect(await login('--model', 'org/repo:m-Q8_0.gguf')).toBe(0)
+      const entry = (await loadRegistry()).models[0]!
+      expect(entry.mmprojPath).toMatch(/mmproj-F16\.gguf$/)
+      expect(entry.mmprojPublished).toBe(true)
+      expect(await Bun.file(entry.mmprojPath!).exists()).toBe(true)
+    })
+
+    test('an install from before projectors were fetched gets one, and its model is not downloaded again', async () => {
+      // The state MotionBuff's bare `obrew login` left behind (job-20260921211527-3d1aba52b673):
+      // the model on disk, no projector, and an entry that never recorded whether one exists.
+      const pulled = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(pulled.id)
+      const registry = await loadRegistry()
+      registry.models = registry.models.map(({ mmprojPublished: _, ...m }) => m)
+      await saveRegistry(registry)
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual(PROJECTOR_ONLY)
+      const entry = (await loadRegistry()).models[0]!
+      expect(entry.mmprojPath).toMatch(/mmproj-F16\.gguf$/)
+      expect(entry.mmprojPublished).toBe(true)
+      expect(entry.addedAt).toBe(pulled.addedAt)
+      // And then it is settled: the next login asks nothing.
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual([])
+    })
+
+    test('a text-only repo is recorded as one, so login succeeds and never asks again', async () => {
+      expect(await login()).toBe(0)
+      const entry = (await loadRegistry()).models[0]!
+      expect(entry.mmprojPath).toBeNull()
+      expect(entry.mmprojPublished).toBe(false)
+    })
+
+    test('an installed model whose size the listing does not advertise is not downloaded again for a projector check', async () => {
+      const pulled = await pullModel({ spec: SIZELESS, signal: new AbortController().signal })
+      await setDefault(pulled.id)
+      const registry = await loadRegistry()
+      registry.models = registry.models.map(({ mmprojPublished: _, ...m }) => m)
+      await saveRegistry(registry)
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual([`GET /api/models/${SIZELESS}/tree/main`])
+    })
+
+    test('a machine that cannot reach the Hub stays set up when only the projector was being checked', async () => {
+      const pulled = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(pulled.id)
+      const endpoint = process.env.HF_ENDPOINT
+      process.env.HF_ENDPOINT = 'http://127.0.0.1:1'
+      try {
+        expect(await login()).toBe(0)
+      } finally {
+        process.env.HF_ENDPOINT = endpoint
+      }
+      expect((await loadRegistry()).models[0]?.mmprojPath).toBeNull()
+    })
+
+    test('--no-mmproj downloads no projector', async () => {
+      expect(await login('--model', 'org/repo:m-Q8_0.gguf', '--no-mmproj')).toBe(0)
+      expect(requests.some((r) => r.includes('mmproj'))).toBe(false)
+      expect((await loadRegistry()).models[0]?.mmprojPath).toBeNull()
+    })
+
+    test('--mmproj stays strict: a text-only repo fails the login', async () => {
+      expect(await login('--mmproj')).toBe(1)
+    })
+
+    test('auth status reports vision once the projector is on disk', async () => {
+      await pullModel({ spec: 'org/repo:m-Q8_0.gguf', makeDefault: true, signal: new AbortController().signal })
+      expect((await authStatus()).model).toMatchObject({ installed: true, vision: false, visionPublished: true })
+      expect(await login()).toBe(0)
+      expect((await authStatus()).model).toMatchObject({ installed: true, vision: true, visionPublished: true })
     })
 
     test('downloads nothing when the default is already on disk', async () => {

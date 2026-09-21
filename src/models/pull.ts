@@ -16,6 +16,13 @@ export interface PullOptions {
   spec: string
   /** `true` = pick the repo's mmproj automatically; a string names one. */
   mmproj?: boolean | string
+  /**
+   * Fetch the repo's projector when it publishes one, and never fail when it does not. This is
+   * `obrew login`'s default: `mmproj: true` throws for a text-only repo, so a host cannot pass
+   * it blindly, and a bare login used to leave every vision model blind (MotionBuff job
+   * job-20260921211527-3d1aba52b673 critiqued five stills it was never shown).
+   */
+  mmprojIfPublished?: boolean
   /** Make it the default once it is installed. `obrew login` does; `obrew models pull` does not. */
   makeDefault?: boolean
   token?: string
@@ -59,25 +66,44 @@ export async function pullModel(opts: PullOptions): Promise<ModelEntry> {
   const registry = await loadRegistry()
   const existing = file ? findModel(registry, modelId(repoId, file)) : null
   const projectorGone = !!existing?.mmprojPath && (await projectorPath(existing)) === null
-  if (existing && !opts.mmproj && !projectorGone && (await isOnDisk(existing))) {
-    opts.onLog?.(`${existing.id} is already installed`)
-    if (opts.makeDefault) await setDefault(existing.id)
-    return existing
+  // The entry itself while its model needs nothing fetched, so the checks below narrow on it.
+  const installed = existing && !opts.mmproj && !projectorGone && (await isOnDisk(existing)) ? existing : null
+  // An installed model with no projector is still worth one listing request when the caller
+  // wants vision wherever it is on offer, unless an earlier pull saw that the repo has none.
+  // An entry written before `mmprojPublished` existed has never been checked, so it asks once.
+  const checkProjector = !!opts.mmprojIfPublished && !existing?.mmprojPath && existing?.mmprojPublished !== false
+  const alreadyInstalled = async (entry: ModelEntry) => {
+    opts.onLog?.(`${entry.id} is already installed`)
+    if (opts.makeDefault) await setDefault(entry.id)
+    return entry
   }
+  if (installed && !checkProjector) return alreadyInstalled(installed)
 
-  const files = await listRepoFiles(repoId, opts.token, opts.signal)
+  let files: HfFile[]
+  try {
+    files = await listRepoFiles(repoId, opts.token, opts.signal)
+  } catch (err) {
+    // The model is here and only the optional projector was being looked for: a machine that
+    // is offline stays set up, and the next login asks again.
+    if (!installed || opts.signal.aborted) throw err
+    opts.onLog?.(`could not check ${repoId} for a vision projector: ${err instanceof Error ? err.message : String(err)}`)
+    return alreadyInstalled(installed)
+  }
   const gguf = chooseGguf(files, file)
-  const path = await fetchFile(repoId, gguf, opts)
+  // An installed model is never fetched again on the projector's account. `fetchFile` would skip
+  // it by size, but a listing that advertises no size skips nothing.
+  const path = installed ? installed.path : await fetchFile(repoId, gguf, opts)
 
+  const mmprojPublished = files.some((f) => isMmproj(f.path))
   let mmprojPath: string | null = existing?.mmprojPath ?? null
   if (opts.mmproj) {
     const proj = chooseMmproj(files, typeof opts.mmproj === 'string' ? opts.mmproj : null)
     mmprojPath = await fetchFile(repoId, proj, opts)
-  } else if (projectorGone) {
-    // Repairing what the entry recorded, not a request for vision: a repo that no longer
-    // publishes a projector drops back to a text-only entry instead of failing the pull.
-    const proj = files.some((f) => isMmproj(f.path)) ? chooseMmproj(files, null) : null
-    mmprojPath = proj ? await fetchFile(repoId, proj, opts) : null
+  } else if (projectorGone || (opts.mmprojIfPublished && !mmprojPath)) {
+    // Repairing what the entry recorded, or taking vision where it is on offer; neither is a
+    // demand for it. A repo that publishes no projector gives a text-only entry instead of
+    // failing the pull.
+    mmprojPath = mmprojPublished ? await fetchFile(repoId, chooseMmproj(files, null), opts) : null
   }
 
   const entry: ModelEntry = {
@@ -86,11 +112,12 @@ export async function pullModel(opts: PullOptions): Promise<ModelEntry> {
     file: gguf.path.split('/').pop()!,
     path,
     mmprojPath,
+    mmprojPublished,
     // The bytes that were written, not the size the listing advertised: `isOnDisk` compares
     // against this, and a listing that is stale or carries no size would otherwise mark a
     // download that verified against its SHA-256 as incomplete on every later run.
     sizeBytes: Bun.file(path).size,
-    addedAt: new Date().toISOString(),
+    addedAt: installed?.addedAt ?? new Date().toISOString(),
   }
   await addModel(entry, { makeDefault: opts.makeDefault })
   opts.onLog?.(`installed ${entry.id}`)

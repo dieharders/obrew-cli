@@ -31,6 +31,13 @@ export const ModelEntrySchema = z.object({
   file: z.string(),
   path: z.string(),
   mmprojPath: z.string().nullable(),
+  /**
+   * Whether the repo listed a vision projector the last time this entry was pulled. Absent
+   * means never checked, which is every entry written before this field existed. `obrew login`
+   * reads it to decide whether an installed model with no projector is worth one listing
+   * request: `false` is a text-only repo, and asking it again on every login would be waste.
+   */
+  mmprojPublished: z.boolean().optional(),
   sizeBytes: z.number(),
   addedAt: z.string(),
 })

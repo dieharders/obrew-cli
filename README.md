@@ -25,7 +25,7 @@ obrew exec [resume <sessionId>] [--json] [--model <id>] [--effort low|medium|hig
            [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none]
            ("<prompt>" | --input-format json)
 obrew auth status [--json]
-obrew login [--model <repo[:file]>] [--json]
+obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--json]
 obrew models list|pull <repo>[:file] [--mmproj]|rm <id>|use <id>
 obrew engine install [--variant cuda|cpu|vulkan|metal] | status | stop
 obrew sessions list|show <id>|rm <id>
@@ -98,8 +98,11 @@ swaps the engine when it differs.
 
 ## Vision, search, embeddings
 
-- `obrew exec --image still.png "what is shown?"` attaches images to a model pulled with
-  `--mmproj`. The transcript keeps a marker per image, not the bytes.
+- `obrew exec --image still.png "what is shown?"` attaches images to a model that has its
+  vision projector (mmproj). `obrew login` downloads the projector whenever the model's repo
+  publishes one (`--no-mmproj` skips it; `--mmproj` fails if there is none), `obrew models pull`
+  only with `--mmproj`, and `obrew auth status` reports it as `model.vision`. The transcript
+  keeps a marker per image, not the bytes.
 - `--tools Read,Grep,Glob,WebSearch` adds a DuckDuckGo-backed search tool (opt-in).
 - `obrew models pull nomic-ai/nomic-embed-text-v1.5-GGUF && obrew models use --embed <id>` sets
   an embedding model; `obrew embed --query "…" "text a" "text b"` ranks texts by cosine
