@@ -29,6 +29,8 @@ export interface McpToolInfo {
   name: string
   description?: string
   inputSchema?: JsonSchema
+  /** MCP tool annotations; only `readOnlyHint` is read (see `Tool.readOnly`). */
+  annotations?: { readOnlyHint?: boolean }
 }
 
 export interface McpContent {

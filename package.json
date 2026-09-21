@@ -1,6 +1,6 @@
 {
   "name": "obrew-cli",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Obrew: local AI models as a headless agent CLI.",
   "type": "module",
   "license": "MIT",

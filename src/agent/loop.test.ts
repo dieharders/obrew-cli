@@ -13,6 +13,7 @@ import { freePort } from '../engine/ports'
 import type { ExecEvent } from '../shared/events'
 import { generationFor } from './effort'
 import { runAgent, type AgentOptions } from './loop'
+import { discriminatedUnion } from './universal'
 import { builtinRegistry, ToolRegistry } from './tools/registry'
 import type { Tool } from './tools/types'
 
@@ -173,6 +174,85 @@ describe('runAgent', () => {
     expect(reqs[1]!.max_tokens).toBe(gen.maxTokens)
   })
 
+  test('universal: the cards say what each tool is for; only the fill sees a schema, and only the chosen one', async () => {
+    const client = await start([{ text: '{"tool":"Read"}' }, { text: '{"path":"src/main.ts"}' }, { text: '{"tool":"none"}' }, { text: 'ok' }])
+    await runAgent({ ...base(client, builtinRegistry('Read,Grep'), []), toolMode: 'universal' })
+    const reqs = await requests()
+    const lastText = (r: Record<string, unknown>) => (r.messages as Array<{ content: string }>).at(-1)!.content
+    expect(lastText(reqs[0]!)).toContain('### Read')
+    expect(lastText(reqs[0]!)).toContain('### Grep')
+    expect(lastText(reqs[0]!)).not.toContain('"properties"')
+    expect(lastText(reqs[1]!)).toContain('Its arguments (JSON Schema): {')
+    expect(lastText(reqs[1]!)).toContain('"path"')
+    expect(lastText(reqs[1]!)).not.toContain('"pattern"') // Grep's
+  })
+
+  // The shape motionbuff publishes for build_slide: a union told apart by a constant field.
+  test('universal: a union tool is narrowed to a branch before it is filled', async () => {
+    const registry = new ToolRegistry()
+    let received: unknown
+    registry.add({
+      name: 'build',
+      description: 'build a slide',
+      inputSchema: {
+        type: 'object',
+        $defs: { id: { type: 'string', enum: ['s-01'] }, item: { type: 'object', properties: { num: { type: 'string' } } }, unused: { type: 'number' } },
+        anyOf: [
+          { type: 'object', properties: { id: { $ref: '#/$defs/id' }, treatment: { const: 'cover' }, params: { type: 'object', properties: { headline: { type: 'string' } } } }, required: ['id', 'treatment', 'params'] },
+          { type: 'object', properties: { id: { $ref: '#/$defs/id' }, treatment: { const: 'agenda' }, params: { type: 'object', properties: { headline: { type: 'string' } } }, children: { type: 'array', items: { $ref: '#/$defs/item' } } }, required: ['id', 'treatment', 'params'] },
+        ],
+      },
+      execute: async (args) => {
+        received = args
+        return { content: 'built' }
+      },
+    })
+    const client = await start([
+      { text: '{"tool":"build"}' },
+      { text: '{"treatment":"agenda"}' },
+      { text: '{"id":"s-01","treatment":"agenda","params":{"headline":"Agenda"}}' },
+      { text: '{"tool":"none"}' },
+      { text: 'ok' },
+    ])
+    await runAgent({ ...base(client, registry, []), toolMode: 'universal' })
+    const reqs = await requests()
+    expect(JSON.stringify(reqs[1]!.response_format)).toContain('"enum":["cover","agenda"]')
+    expect(reqs[1]!.max_tokens).toBe(512)
+    const filled = JSON.stringify(reqs[2]!.response_format)
+    expect(filled).toContain('"const":"agenda"')
+    expect(filled).not.toContain('"const":"cover"')
+    // The branch carries the $defs it points at, and no others.
+    expect(filled).toContain('"item"')
+    expect(filled).not.toContain('"unused"')
+    expect((reqs[2]!.messages as Array<{ content: string }>).at(-1)!.content).toContain('"const":"agenda"')
+    expect(received).toEqual({ id: 's-01', treatment: 'agenda', params: { headline: 'Agenda' } })
+  })
+
+  test('universal: a union with no constant field in common is filled whole', () => {
+    expect(discriminatedUnion({ anyOf: [{ properties: { a: { const: 'x' } } }, { properties: { b: { const: 'y' } } }] })).toBeNull()
+    expect(discriminatedUnion({ type: 'object', properties: { a: { type: 'string' } } })).toBeNull()
+  })
+
+  test('universal: a branch keeps what sits beside the union, and follows draft-07 definitions', () => {
+    const union = discriminatedUnion({
+      type: 'object',
+      properties: { id: { $ref: '#/definitions/id' } },
+      required: ['id'],
+      definitions: { id: { type: 'string' }, unused: { type: 'number' } },
+      oneOf: [
+        { properties: { kind: { const: 'a' }, n: { type: 'number' } }, required: ['kind'] },
+        { properties: { kind: { const: 'b' } }, required: ['kind'] },
+      ],
+    })!
+    expect(union.key).toBe('kind')
+    expect(union.branches.get('a')).toEqual({
+      type: 'object',
+      properties: { id: { $ref: '#/definitions/id' }, kind: { const: 'a' }, n: { type: 'number' } },
+      required: ['id', 'kind'],
+      definitions: { id: { type: 'string' } },
+    })
+  })
+
   test('universal: a choose cut off at max_tokens is reported on stderr and answered without a tool', async () => {
     const client = await start([
       { text: '{"tool":"Read","reason":"the still shows the still shows the', finish: 'length' },
@@ -323,5 +403,131 @@ describe('runAgent repeat guard', () => {
     expect(last.role).toBe('user')
     expect(last.content).toMatch(/repeated the same tool call/)
     expect(result.produced.filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  /** A registry of counting tools: `build` changes things, `lint` only looks. */
+  const counting = () => {
+    const runs: string[] = []
+    const registry = new ToolRegistry()
+    const tool = (name: string, readOnly: boolean): Tool => ({
+      name,
+      description: name,
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+      ...(readOnly ? { readOnly: true } : {}),
+      execute: async (args) => {
+        runs.push(`${name}:${String(args.id ?? '')}`)
+        return { content: `${name} OK` }
+      },
+    })
+    registry.add(tool('build', false))
+    registry.add(tool('lint', true))
+    return { registry, runs }
+  }
+
+  const run = async (script: unknown[], registry: ToolRegistry) => {
+    const port = await freePort()
+    server = await LlamaServer.start({
+      command: [process.execPath, FAKE_SERVER],
+      args: ['-m', 'fake', '--port', String(port)],
+      port,
+      model: 'fake',
+      env: { FAKE_SCRIPT: JSON.stringify(script), FAKE_LOG_REQUESTS: requestLog },
+      logPath: null,
+    })
+    const events: ExecEvent[] = []
+    const result = await runAgent({
+      client: server.client,
+      messages: [{ role: 'user', content: 'build it' }],
+      gen: generationFor('low'),
+      registry,
+      toolMode: 'native',
+      toolContext: { cwd, signal: new AbortController().signal },
+      maxIterations: 10,
+      signal: new AbortController().signal,
+      emit: (e) => events.push(e),
+    })
+    return { result, events }
+  }
+
+  // The motionbuff case: build → lint ("OK") → the same build. The lint in between used to hide
+  // the repeat from a guard that only looked one call back.
+  test('a repeat is caught across a read-only call, and is not run or reported a second time', async () => {
+    const { registry, runs } = counting()
+    const { result, events } = await run(
+      [
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { toolCalls: [{ name: 'lint', arguments: {} }] },
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { text: 'done' },
+      ],
+      registry,
+    )
+    expect(runs).toEqual(['build:s-01', 'lint:'])
+    expect(events.filter((e) => e.type === 'tool.start')).toHaveLength(2)
+    expect(result.finalText).toBe('done')
+    const skipped = result.produced.filter((m) => m.role === 'tool').at(-1)!
+    expect(skipped.content).toMatch(/^Not run again/)
+    expect(skipped.content).toContain('build OK')
+    const reqs = (await readFile(requestLog, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>)
+    expect(reqs.at(-1)!.tools).toBeUndefined()
+  })
+
+  test('the same check after a real change is a new check: lint → build → lint runs both lints', async () => {
+    const { registry, runs } = counting()
+    await run(
+      [
+        { toolCalls: [{ name: 'lint', arguments: {} }] },
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { toolCalls: [{ name: 'lint', arguments: {} }] },
+        { text: 'done' },
+      ],
+      registry,
+    )
+    expect(runs).toEqual(['lint:', 'build:s-01', 'lint:'])
+  })
+
+  test('a failed call may be retried; failing the same way twice is what stands', async () => {
+    const registry = new ToolRegistry()
+    let runs = 0
+    registry.add({
+      name: 'fetch',
+      description: 'fetch',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => (++runs === 1 ? { content: 'Error: timed out', isError: true } : { content: 'fetched' }),
+    })
+    const call = { toolCalls: [{ name: 'fetch', arguments: {} }] }
+    const { result } = await run([call, call, call, { text: 'done' }], registry)
+    expect(runs).toBe(2)
+    const tools = result.produced.filter((m) => m.role === 'tool').map((m) => m.content)
+    expect(tools[1]).toBe('fetched')
+    expect(tools[2]).toMatch(/^Not run again/)
+  })
+
+  test('a skipped repeat shows its images again', async () => {
+    const registry = new ToolRegistry()
+    registry.add({
+      name: 'look',
+      description: 'look',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => ({ content: 'a still', images: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }),
+    })
+    const call = { toolCalls: [{ name: 'look', arguments: {} }] }
+    const { result } = await run([call, call, { text: 'done' }], registry)
+    expect(result.produced.filter((m) => m.content === 'Image from look: [image]')).toHaveLength(2)
+  })
+
+  test('the same tool with different arguments is not a repeat', async () => {
+    const { registry, runs } = counting()
+    await run(
+      [
+        { toolCalls: [{ name: 'build', arguments: { id: 's-01' } }] },
+        { toolCalls: [{ name: 'build', arguments: { id: 's-02' } }] },
+        { text: 'done' },
+      ],
+      registry,
+    )
+    expect(runs).toEqual(['build:s-01', 'build:s-02'])
   })
 })
