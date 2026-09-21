@@ -41,6 +41,18 @@ A host driving `exec` should pass the turn's text on stdin rather than in argv: 
 a long prompt, or a large schema, clear of the ~32 KB Windows allows for a whole command line,
 and nothing has to be written to a temp file.
 
+## Which model runs
+
+`exec` with no `--model` runs the default: the one chosen with `obrew models use <id>`, else
+the built-in Gemma 4 E2B when the machine has it, else whatever else it has — so a machine set
+up with `obrew models pull` alone still runs. A plain pull never takes the default away from a
+model that already holds it, and removing the default falls back to a model that is left rather
+than to one that was never downloaded. `obrew models list` marks the default with `*`, and
+`obrew auth status` reports it and whether it is installed.
+
+`obrew login` installs that same default, so a choice survives the next login instead of being
+replaced by the built-in model; `login --model <repo[:file]>` names one and makes it the default.
+
 ## Tools are constrained, always
 
 The model never emits free-form tool JSON. With a chat template that knows about tools
@@ -80,8 +92,9 @@ the `exec` or `engine start` that starts it: that engine gets a console window o
 `obrew serve --port 8008` fronts the same engine with an OpenAI-compatible API:
 `/v1/chat/completions`, `/v1/completions`, `/v1/models`, plus `/obrew/status`, `/obrew/models`
 and `POST /obrew/models/pull` (SSE progress), which installs a model the way `obrew models pull`
-does and leaves the default alone. The `model` field picks the model and swaps the engine when
-it differs.
+does and leaves the default alone — `POST /obrew/models/default {"id": "<model id>"}` is
+`obrew models use` for when a host wants to move it. The `model` field picks the model and
+swaps the engine when it differs.
 
 ## Vision, search, embeddings
 

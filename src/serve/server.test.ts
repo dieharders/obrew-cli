@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
 import { stopShared } from '../engine/shared'
-import { saveRegistry } from '../models/registry'
+import { loadRegistry, saveRegistry } from '../models/registry'
 import { ObrewServer } from './server'
 
 describe('obrew serve', () => {
@@ -118,6 +118,35 @@ describe('obrew serve', () => {
       hub.stop(true)
       delete process.env.HF_ENDPOINT
     }
+  })
+
+  test('/obrew/models/default is `obrew models use` over HTTP', async () => {
+    const setDefault = (body: unknown) =>
+      fetch(`${base}/obrew/models/default`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await setDefault({})).status).toBe(400)
+    expect((await setDefault({ id: 'o/r:nope.gguf' })).status).toBe(404)
+    const res = await setDefault({ id: 'o/r:b.gguf' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ default: 'o/r:b.gguf' })
+    const status = (await (await fetch(`${base}/obrew/status`)).json()) as { default: string; chosen: string | null }
+    expect(status).toMatchObject({ default: 'o/r:b.gguf', chosen: 'o/r:b.gguf' })
+  })
+
+  test('/obrew/status and /obrew/models give the same answer when no default was chosen', async () => {
+    await saveRegistry({ ...(await loadRegistry()), default: null })
+    type View = { default: string; chosen: string | null; defaultInstalled: boolean }
+    const status = (await (await fetch(`${base}/obrew/status`)).json()) as View
+    const models = (await (await fetch(`${base}/obrew/models`)).json()) as View
+    // Not null and not the built-in model this machine has never downloaded: the model a
+    // completion with no `model` would actually run, reported the same way by both routes.
+    expect(status).toMatchObject({ default: 'o/r:a.gguf', chosen: null, defaultInstalled: true })
+    expect(models).toMatchObject({ default: 'o/r:a.gguf', chosen: null, defaultInstalled: true })
+    const res = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(res.status).toBe(200)
   })
 
   test('/v1/embeddings answers in the OpenAI shape once an embedding model is set', async () => {

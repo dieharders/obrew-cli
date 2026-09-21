@@ -2,13 +2,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, te
 import { rm, writeFile } from 'node:fs/promises'
 import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
 import { runLogin } from '../cli/commands/login'
-import { DEFAULT_LOGIN_MODEL } from '../shared/config'
+import { modelId, parseModelSpec } from './hf'
 import { pullModel } from './pull'
-import { defaultModelId, loadRegistry, removeModel, resolveModel, setDefault } from './registry'
+import { BUILT_IN_DEFAULT_MODEL, defaultModelId, loadRegistry, removeModel, resolveModel, saveRegistry, setDefault } from './registry'
 
 /**
- * A fake Hub, served with Range support: one repo with two quants and an mmproj, and the
- * built-in default's repo with its one file, so `obrew login` can be run against it.
+ * A fake Hub, served with Range support: one repo with two quants and an mmproj, the built-in
+ * default's repo with its one file so `obrew login` can be run against it, and one repo whose
+ * listing advertises no sizes at all.
  */
 describe('pullModel', () => {
   let home: Awaited<ReturnType<typeof tempHome>>
@@ -18,10 +19,17 @@ describe('pullModel', () => {
     'm-Q8_0.gguf': new Uint8Array(1000).fill(7),
     'mmproj-F16.gguf': new Uint8Array(500).fill(9),
   }
-  const [builtInRepo, builtInFile] = DEFAULT_LOGIN_MODEL.split(':') as [string, string]
+  // Derived, not split by hand: the constant may name a repo with no file, and then the id to
+  // expect is whatever `chooseGguf` picks out of the repo — not the constant itself.
+  const builtIn = parseModelSpec(BUILT_IN_DEFAULT_MODEL)
+  const builtInFile = builtIn.file ?? 'built-in-Q8_0.gguf'
+  const builtInId = modelId(builtIn.repoId, builtInFile)
+  /** A repo whose tree carries neither `size` nor `lfs.size`, as some published repos do. */
+  const SIZELESS = 'org/sizeless'
   const repos: Record<string, Record<string, Uint8Array>> = {
     'org/repo': files,
-    [builtInRepo]: { [builtInFile]: new Uint8Array(3000).fill(3) },
+    [builtIn.repoId]: { [builtInFile]: new Uint8Array(3000).fill(3) },
+    [SIZELESS]: { 'n-Q4_K_M.gguf': new Uint8Array(1200).fill(11) },
   }
   const sha = (b: Uint8Array) => new Bun.CryptoHasher('sha256').update(b).digest('hex')
   let requests: string[] = []
@@ -37,8 +45,14 @@ describe('pullModel', () => {
         if (tree) {
           const repo = repos[tree[1]!]
           if (!repo) return new Response('nf', { status: 404 })
+          const sized = tree[1] !== SIZELESS
           return Response.json(
-            Object.entries(repo).map(([path, bytes]) => ({ type: 'file', path, size: bytes.length, lfs: { oid: sha(bytes), size: bytes.length } })),
+            Object.entries(repo).map(([path, bytes]) => ({
+              type: 'file',
+              path,
+              ...(sized ? { size: bytes.length } : {}),
+              lfs: { oid: sha(bytes), ...(sized ? { size: bytes.length } : {}) },
+            })),
           )
         }
         const m = url.pathname.match(/^\/([^/]+\/[^/]+)\/resolve\/main\/(.+)$/)
@@ -70,18 +84,44 @@ describe('pullModel', () => {
   })
   afterEach(() => home.cleanup())
 
-  test('pulls the preferred quant, verifies it, registers it without making it the default', async () => {
+  test('pulls the preferred quant, verifies it, and chooses no default — but is what `exec` runs', async () => {
     const progress: number[] = []
     const entry = await pullModel({ spec: 'org/repo', signal: new AbortController().signal, onProgress: (_f, r) => progress.push(r) })
     expect(entry.id).toBe('org/repo:m-Q4_K_M.gguf')
     expect(entry.mmprojPath).toBeNull()
+    expect(entry.sizeBytes).toBe(70_000)
     expect(await Bun.file(entry.path).arrayBuffer()).toHaveLength(70_000)
     expect(progress.at(-1)).toBe(70_000)
     const registry = await loadRegistry()
     expect(registry.models.map((m) => m.id)).toEqual([entry.id])
+    // Nothing was chosen — and the only model installed is still the one a bare `obrew exec`
+    // has to run, or a machine set up with `models pull` alone could not run anything.
     expect(registry.default).toBeNull()
-    await expect(resolveModel(undefined)).rejects.toMatchObject({ code: 'model_missing' })
+    expect(defaultModelId(registry)).toBe(entry.id)
+    expect(await resolveModel(undefined)).toMatchObject({ id: entry.id })
+    expect(await resolveModel('default')).toMatchObject({ id: entry.id })
     expect(await resolveModel(entry.id)).toMatchObject({ id: entry.id })
+  })
+
+  test('a listing that advertises no size still installs, and stays installed', async () => {
+    const entry = await pullModel({ spec: SIZELESS, signal: new AbortController().signal })
+    // The size recorded is the file's own, not the listing's 0, so `isOnDisk` has something
+    // to compare against and the model is not re-fetched on every later run.
+    expect(entry.sizeBytes).toBe(1200)
+    expect(await resolveModel(entry.id)).toMatchObject({ id: entry.id })
+    requests = []
+    await pullModel({ spec: `${SIZELESS}:n-Q4_K_M.gguf`, signal: new AbortController().signal })
+    expect(requests).toEqual([])
+  })
+
+  test('an entry recorded with an unknown size is judged on existence alone', async () => {
+    const entry = await pullModel({ spec: SIZELESS, signal: new AbortController().signal })
+    const registry = await loadRegistry()
+    registry.models = registry.models.map((m) => ({ ...m, sizeBytes: 0 }))
+    await saveRegistry(registry)
+    expect(await resolveModel(entry.id)).toMatchObject({ id: entry.id })
+    await rm(entry.path)
+    await expect(resolveModel(entry.id)).rejects.toMatchObject({ code: 'model_missing' })
   })
 
   test('resumes a cut-off download with a Range request and still verifies', async () => {
@@ -98,7 +138,7 @@ describe('pullModel', () => {
     expect(sha(bytes)).toBe(sha(files['m-Q4_K_M.gguf']!))
   })
 
-  test('explicit file plus mmproj; use sets the default; rm of the default leaves none', async () => {
+  test('explicit file plus mmproj; use sets the default; rm of it falls back to what is left', async () => {
     const signal = new AbortController().signal
     const a = await pullModel({ spec: 'org/repo:m-Q4_K_M.gguf', signal })
     const b = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', mmproj: true, signal })
@@ -111,8 +151,22 @@ describe('pullModel', () => {
     expect(await Bun.file(b.mmprojPath!).exists()).toBe(false)
     const registry = await loadRegistry()
     expect(registry.models.map((m) => m.id)).toEqual([a.id])
+    // The choice is gone with the model it named, but the machine still has one it can run,
+    // so that is what `exec` falls back to — not the built-in model it has never downloaded.
     expect(registry.default).toBeNull()
-    expect(defaultModelId(registry)).toBe(DEFAULT_LOGIN_MODEL)
+    expect(defaultModelId(registry)).toBe(a.id)
+    expect(await resolveModel(undefined)).toMatchObject({ id: a.id })
+  })
+
+  test('a pull never takes the default away from the model that holds it', async () => {
+    const signal = new AbortController().signal
+    const a = await pullModel({ spec: 'org/repo:m-Q4_K_M.gguf', signal })
+    await setDefault(a.id)
+    const b = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal })
+    const registry = await loadRegistry()
+    expect(registry.default).toBe(a.id)
+    expect(defaultModelId(registry)).toBe(a.id)
+    expect(b.id).not.toBe(a.id)
   })
 
   test('a missing model is model_missing', async () => {
@@ -128,10 +182,10 @@ describe('pullModel', () => {
       delete process.env.OBREW_LLAMA_SERVER
     })
     /** Runs login with its JSON events kept off the test output. */
-    const login = async () => {
+    const login = async (...args: string[]) => {
       const quiet = spyOn(process.stdout, 'write').mockImplementation(() => true)
       try {
-        return await runLogin(['--json'])
+        return await runLogin(['--json', ...args])
       } finally {
         quiet.mockRestore()
       }
@@ -140,8 +194,38 @@ describe('pullModel', () => {
     test('a fresh install gets the built-in default, set as the default', async () => {
       expect(await login()).toBe(0)
       const registry = await loadRegistry()
-      expect(registry.default).toBe(DEFAULT_LOGIN_MODEL)
-      expect(registry.models.map((m) => m.id)).toEqual([DEFAULT_LOGIN_MODEL])
+      expect(registry.default).toBe(builtInId)
+      expect(registry.models.map((m) => m.id)).toEqual([builtInId])
+    })
+
+    test('--model names one explicitly and replaces a default that was already chosen', async () => {
+      const chosen = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      await setDefault(chosen.id)
+      expect(await login('--model', 'org/repo:m-Q4_K_M.gguf')).toBe(0)
+      const registry = await loadRegistry()
+      expect(registry.default).toBe('org/repo:m-Q4_K_M.gguf')
+      expect(registry.models.map((m) => m.id).sort()).toEqual(['org/repo:m-Q4_K_M.gguf', chosen.id])
+    })
+
+    test('a model pulled but never chosen is what login installs, not the built-in one', async () => {
+      const pulled = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', signal: new AbortController().signal })
+      requests = []
+      expect(await login()).toBe(0)
+      expect(requests).toEqual([])
+      const registry = await loadRegistry()
+      expect(registry.default).toBe(pulled.id)
+      expect(registry.models.map((m) => m.id)).toEqual([pulled.id])
+    })
+
+    test('a default whose vision projector went missing has it fetched again', async () => {
+      const chosen = await pullModel({ spec: 'org/repo:m-Q8_0.gguf', mmproj: true, signal: new AbortController().signal })
+      await setDefault(chosen.id)
+      await rm(chosen.mmprojPath!)
+      expect(await login()).toBe(0)
+      // Not "already installed": the entry claims vision, and llama-server does not start with
+      // `--mmproj` pointing at nothing.
+      expect(await Bun.file(chosen.mmprojPath!).exists()).toBe(true)
+      expect((await loadRegistry()).models[0]?.mmprojPath).toBe(chosen.mmprojPath)
     })
 
     test('a chosen default is respected: login leaves it alone and never installs the built-in one', async () => {
@@ -180,7 +264,7 @@ describe('pullModel', () => {
       await expect(resolveModel(undefined)).rejects.toMatchObject({ code: 'model_missing' })
       expect(await login()).toBe(0)
       expect(Bun.file(entry.path).size).toBe(entry.sizeBytes)
-      expect(await resolveModel(undefined)).toMatchObject({ id: DEFAULT_LOGIN_MODEL })
+      expect(await resolveModel(undefined)).toMatchObject({ id: builtInId })
     })
   })
 })

@@ -25,7 +25,7 @@ import { engineConsoleFrom, launchArgs, loadOptionsFrom } from '../../engine/fla
 import { requireEngine } from '../../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../../engine/shared'
 import { reapOrphans } from '../../engine/running'
-import { resolveModel } from '../../models/registry'
+import { projectorPath, resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
 import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
 import { ExecInputSchema, type ExecEvent } from '../../shared/events'
@@ -237,8 +237,11 @@ export async function runExec(argv: string[]): Promise<number> {
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
+    // The projector as it is on disk, not as the registry remembers it: a recorded path whose
+    // file is gone would stop llama-server from starting at all.
+    const mmprojPath = await projectorPath(model)
     let imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
-    if (imagePaths.length > 0 && !model.mmprojPath) {
+    if (imagePaths.length > 0 && !mmprojPath) {
       // Degrade, loudly, rather than fail: a host attaches a still to every critique turn, and
       // a model pulled without its projector would otherwise fail the whole job on the first
       // one. The prompt still names the file; the turn runs on text alone.
@@ -266,7 +269,7 @@ export async function runExec(argv: string[]): Promise<number> {
 
     const loadOpts = loadOptionsFrom(pairs, {
       ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
-      ...(model.mmprojPath ? { mmprojPath: model.mmprojPath } : {}),
+      ...(mmprojPath ? { mmprojPath } : {}),
     })
     armStall()
     handle = await acquireEngine({
@@ -317,7 +320,7 @@ export async function runExec(argv: string[]): Promise<number> {
       gen,
       registry,
       toolMode,
-      toolContext: { cwd, signal: controller.signal, vision: Boolean(model.mmprojPath) },
+      toolContext: { cwd, signal: controller.signal, vision: Boolean(mmprojPath) },
       maxIterations,
       signal: controller.signal,
       emit,

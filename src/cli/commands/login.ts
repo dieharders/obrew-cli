@@ -9,7 +9,7 @@
  * runs, in a real terminal so the progress is visible.
  */
 import { pullModel } from '../../models/pull'
-import { defaultModelId, loadRegistry, setDefault } from '../../models/registry'
+import { defaultModelId, loadRegistry } from '../../models/registry'
 import { findEngine, installEngine } from '../../engine/install'
 import { hfToken, loadConfig, VARIANTS } from '../../shared/config'
 import { track, untrack } from '../../shared/proc'
@@ -53,16 +53,18 @@ export async function runLogin(argv: string[]): Promise<number> {
     }
 
     // The model is fetched whenever this machine does not have it on disk as downloaded, and
-    // pullModel fetches nothing when it does. No other model is looked at.
+    // pullModel fetches nothing when it does. No other model is looked at. `makeDefault` is
+    // applied in the same registry write as the install, so a pull running against `obrew
+    // serve` at that moment cannot be lost between the two.
     const entry = await pullModel({
       spec: values.model ?? defaultModelId(await loadRegistry()),
       mmproj: values.mmproj,
+      makeDefault: true,
       token: hfToken(config),
       signal: controller.signal,
       onLog: log,
       onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
     })
-    await setDefault(entry.id)
     log(`default model: ${entry.id}`)
 
     out.event({ type: 'setup.done', ok: true, message: 'obrew is ready' })

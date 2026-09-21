@@ -29,10 +29,15 @@ export class EmbeddingEngine {
     this.model = model
   }
 
-  /** Resolve the embedding model (query → config.embedModel → error). Nothing starts yet. */
+  /**
+   * Resolve the embedding model (query → config.embedModel → error). Nothing starts yet.
+   *
+   * `default` means the configured embedding model, not the chat default `resolveModel` would
+   * pick for that word, so the sentinel is spent here and never reaches it.
+   */
   static async open(query: string | undefined, signal?: AbortSignal): Promise<EmbeddingEngine> {
     const config = await loadConfig()
-    const key = query ?? config.embedModel
+    const key = (query === 'default' ? undefined : query) ?? config.embedModel
     if (!key) {
       throw new ObrewError('model_missing', 'no embedding model set; pull one (e.g. nomic-ai/nomic-embed-text-v1.5-GGUF) and run `obrew models use --embed <id>`')
     }

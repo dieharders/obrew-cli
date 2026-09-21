@@ -334,12 +334,15 @@ describe('obrew exec --image', () => {
   })
   afterEach(() => home.cleanup())
 
-  const registry = (mmproj: string | null) =>
-    saveRegistry({
+  /** `onDisk: false` records a projector the machine does not have, as a deleted file leaves. */
+  const registry = async (mmproj: string | null, onDisk = true) => {
+    if (mmproj && onDisk) await writeFile(mmproj, 'GGUF')
+    await saveRegistry({
       version: 1,
       default: 'org/repo:m.gguf',
       models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: mmproj, sizeBytes: 4, addedAt: '' }],
     })
+  }
 
   test('sends the image as a data URL part and keeps a marker in the transcript', async () => {
     await registry(join(home.dir, 'mmproj.gguf'))
@@ -371,6 +374,18 @@ describe('obrew exec --image', () => {
     const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
     expect(req.messages.find((m) => m.role === 'user')!.content).toBe('describe')
   }, TIMEOUT_MS)
+
+  test('a projector the registry records but the machine does not have degrades the same way', async () => {
+    // Not a failure to start: `--mmproj <missing path>` stops llama-server dead, so a recorded
+    // projector that is gone is no vision support. `obrew models pull <id>` fetches it back.
+    await registry(join(home.dir, 'mmproj.gguf'), false)
+    const log = join(home.dir, 'requests.jsonl')
+    const { code, stderr } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], { FAKE_LOG_REQUESTS: log })
+    expect(code).toBe(0)
+    expect(stderr).toMatch(/no vision projector/)
+    const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
+    expect(req.messages.find((m) => m.role === 'user')!.content).toBe('describe')
+  }, TIMEOUT_MS)
 })
 
 describe('obrew exec: images through Read', () => {
@@ -388,12 +403,14 @@ describe('obrew exec: images through Read', () => {
   })
   afterEach(() => home.cleanup())
 
-  const registry = (mmproj: string | null) =>
-    saveRegistry({
+  const registry = async (mmproj: string | null) => {
+    if (mmproj) await writeFile(mmproj, 'GGUF')
+    await saveRegistry({
       version: 1,
       default: 'org/repo:m.gguf',
       models: [{ id: 'org/repo:m.gguf', repoId: 'org/repo', file: 'm.gguf', path: modelPath, mmprojPath: mmproj, sizeBytes: 4, addedAt: '' }],
     })
+  }
 
   test('with a vision model, Read of a still hands the model the image', async () => {
     await registry(join(home.dir, 'mmproj.gguf'))
