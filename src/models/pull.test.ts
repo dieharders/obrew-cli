@@ -177,9 +177,13 @@ describe('pullModel', () => {
   describe('obrew login', () => {
     beforeEach(() => {
       process.env.OBREW_LLAMA_SERVER = FAKE_SERVER
+      // These tests count the requests login makes for the DEFAULT model. The tool model is a
+      // second download with its own listing, so it is switched off here.
+      process.env.OBREW_TOOL_MODEL = 'none'
     })
     afterEach(() => {
       delete process.env.OBREW_LLAMA_SERVER
+      delete process.env.OBREW_TOOL_MODEL
     })
     /** Runs login with its JSON events kept off the test output. */
     const login = async (...args: string[]) => {

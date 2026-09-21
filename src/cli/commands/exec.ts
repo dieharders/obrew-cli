@@ -26,6 +26,10 @@ import { requireEngine } from '../../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../../engine/shared'
 import { reapOrphans } from '../../engine/running'
 import { projectorPath, resolveModel } from '../../models/registry'
+import { resolveToolModel } from '../../needle/resolve'
+import { NeedleSession } from '../../needle/session'
+import { reapIdleNeedles } from '../../needle/sidecar'
+import { answerTools, callTools, needleExtractable } from '../../needle/structure'
 import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
 import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
 import { ExecInputSchema, type ExecEvent } from '../../shared/events'
@@ -68,7 +72,19 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
 
   -c tool_mode=native|universal|none   native = the chat template's own (grammar-constrained)
                              tool calls; universal = two schema-constrained steps; default is
-                             native when the template mentions tools, else universal.`
+                             native when the template mentions tools, else universal.
+  -c tool_model=needle3|none|<path.cact>   the model that turns the baseline model's text into
+                             tool calls and schema'd answers (OBREW_TOOL_MODEL sets the default;
+                             needle3 when installed). It never writes content, and whatever it
+                             cannot settle is decoded under a grammar by the baseline model.
+  -c tool_confidence=N       how sure the tool model must be of a tool the text did not name
+                             (0..1, default 0.7).
+  -c tool_answers=true       EXPERIMENTAL, off by default (OBREW_TOOL_ANSWERS=1 turns it on): also
+                             draft the --output-schema answer as text and have the tool model
+                             structure it. needle3 copies multi-field records too unreliably for
+                             this to pay yet; a failed copy is caught and decoded under a grammar.
+
+  The baseline model is --model, else OBREW_MODEL, else the default (\`obrew models use\`).`
 
 const OPTIONS = {
   json: { type: 'boolean', default: false },
@@ -192,6 +208,13 @@ export async function runExec(argv: string[]): Promise<number> {
     throw new UsageError(`-c tool_mode must be native|universal|none, got "${String(requestedMode)}"`)
   }
 
+  const toolModelOverride = pairs.tool_model !== undefined ? String(pairs.tool_model) : undefined
+  const toolAnswers = pairs.tool_answers !== undefined ? String(pairs.tool_answers) === 'true' : process.env.OBREW_TOOL_ANSWERS === '1'
+  const toolConfidence = pairs.tool_confidence !== undefined ? Number(pairs.tool_confidence) : undefined
+  if (toolConfidence !== undefined && !(toolConfidence >= 0 && toolConfidence <= 1)) {
+    throw new UsageError(`-c tool_confidence must be a number from 0 to 1, got "${String(pairs.tool_confidence)}"`)
+  }
+
   const startedAt = Date.now()
   const controller = new AbortController()
   track(controller)
@@ -234,6 +257,7 @@ export async function runExec(argv: string[]): Promise<number> {
   try {
     await reapOrphans(out.log)
     if ((await reapIdleShared()) ) out.log('engine: stopped the idle shared llama-server')
+    await reapIdleNeedles()
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
@@ -271,6 +295,16 @@ export async function runExec(argv: string[]): Promise<number> {
       ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
       ...(mmprojPath ? { mmprojPath } : {}),
     })
+    // The tool model runs beside the engine, not instead of it, so its side-cars start while
+    // the model loads. Which toolset the run needs is known early only when the host said so
+    // (`-c tool_mode=universal`, which motionbuff always passes); otherwise it waits for /props.
+    const toolModel = await resolveToolModel(toolModelOverride, config)
+    const needle = toolModel.enabled
+      ? new NeedleSession({ model: toolModel, idleTtlMs, signal: controller.signal, log: out.log })
+      : null
+    if (needle && toolAnswers && outputSchema && needleExtractable(outputSchema)) void needle.warm(answerTools(outputSchema), true)
+    if (needle && requestedMode === 'universal' && registry.size > 0) void needle.warm(callTools(registry.list()), false)
+
     armStall()
     handle = await acquireEngine({
       mode: engineMode,
@@ -286,7 +320,13 @@ export async function runExec(argv: string[]): Promise<number> {
         emit({ type: 'engine.status', state })
       },
     })
-    emit({ type: 'session', sessionId, model: model.id, engine: { tag: engine.tag, variant: engine.variant, port: handle.port } })
+    emit({
+      type: 'session',
+      sessionId,
+      model: model.id,
+      toolModel: needle ? toolModel.id : null,
+      engine: { tag: engine.tag, variant: engine.variant, port: handle.port },
+    })
 
     const history = (session?.messages ?? []).filter((m) => m.role !== 'system')
     const userMessage: ChatMessage = { role: 'user', content: userContent(prompt, images) }
@@ -328,6 +368,8 @@ export async function runExec(argv: string[]): Promise<number> {
       includeToolIo: values['include-tool-io'],
       outputSchema,
       grammar,
+      ...(needle ? { needle, needleAnswers: toolAnswers } : {}),
+      ...(toolConfidence !== undefined ? { toolConfidence } : {}),
     })
     toStore.push(...result.produced)
     await appendMessages(sessionId, toStore)

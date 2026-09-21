@@ -19,6 +19,8 @@ export const ExecEventSchema = z.discriminatedUnion('type', [
     type: z.literal('session'),
     sessionId: z.string(),
     model: z.string(),
+    /** The tool model this run structures with (`needle3`), or null when it has none. */
+    toolModel: z.string().nullable().optional(),
     engine: z.object({ tag: z.string(), variant: z.string(), port: z.number() }),
   }),
   z.object({

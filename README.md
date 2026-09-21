@@ -52,6 +52,39 @@ than to one that was never downloaded. `obrew models list` marks the default wit
 
 `obrew login` installs that same default, so a choice survives the next login instead of being
 replaced by the built-in model; `login --model <repo[:file]>` names one and makes it the default.
+`OBREW_MODEL=<id>` names the baseline model for a host that configures by environment: below an
+explicit `--model`, above the default.
+
+## The tool model
+
+Two models, two jobs. The **baseline** model above writes — prose, narration, the content of an
+answer. The **tool model** turns what it wrote into a tool call. It is
+[Needle 3](https://cactuscompute.com/needle): 121M parameters, 36 MB, a model that only emits
+function calls, and whose arguments are spans copied from its input, so it is never asked to
+invent anything. It is not a GGUF and llama.cpp cannot load it; `obrew login` (or
+`obrew engine install --needle`) fetches it and its ~1 MB runner from a pinned Hugging Face
+commit, checksum-verified, and it runs as its own small process **beside** llama-server, kept
+warm the same way (`obrew engine status` lists it, `obrew engine stop` stops it). The runner's
+telemetry is always switched off; nothing can turn it on.
+
+In universal tool mode the baseline model states the next step in plain lines —
+
+    tool: snapshot
+    slideId: slide-3
+
+— seeing only each tool's name, description and argument names, while Needle holds the JSON
+schemas and produces the call in tens of milliseconds. Every value is then checked against the
+text it came from. Whatever does not check out — an unsure choice, arguments that are an
+authored body such as a file's contents — goes to the two constrained requests described below,
+so a run never depends on the tool model: without it (`-c tool_model=none`,
+`OBREW_TOOL_MODEL=none`, `obrew models use --tool none`, or a platform with no runner) obrew
+behaves exactly as it did before.
+
+`-c tool_answers=true` (or `OBREW_TOOL_ANSWERS=1`) extends this to `--output-schema` answers:
+drafted as text with thinking allowed, structured by Needle. It is **off by default** because
+needle3 does not yet copy multi-field records reliably (60–67% of fields exact in our tests,
+non-ASCII text mangled); each miss is caught and decoded under a grammar instead, at the cost of
+the draft.
 
 ## Tools are constrained, always
 
@@ -111,7 +144,8 @@ swaps the engine when it differs.
 
 `%LOCALAPPDATA%\Obrew` on Windows, `~/Library/Application Support/Obrew` on macOS,
 `$XDG_DATA_HOME/obrew` on Linux. Override with `OBREW_HOME`. Engines are downloaded from the
-pinned llama.cpp release (`llamacpp_tag` in package.json); models from Hugging Face.
+pinned llama.cpp release (`llamacpp_tag` in package.json); models from Hugging Face; the tool
+model from the pinned `needle_rev`. `.env.example` lists the environment variables obrew reads.
 
 ## Development
 

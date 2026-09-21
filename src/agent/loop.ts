@@ -15,6 +15,9 @@
  *   --output-schema: one final constrained request, tools off (a schema and `tools` never
  *                    share a request), whose JSON becomes `turn.completed.output`. With no
  *                    tools at all, that request IS the turn and the loop never runs.
+ *                    With a tool model and a schema it can fill, the answer is drafted as free
+ *                    text and structured by Needle first (../needle/structure.ts); the
+ *                    constrained request is then the fallback, not the rule.
  */
 import type { EngineClient } from '../engine/client'
 import { ObrewError } from '../shared/errors'
@@ -27,6 +30,8 @@ import type { JsonSchema, ToolContext, ToolOutput } from './tools/types'
 import { describeViolations, validate } from './tools/validate'
 import { runTurn, type TurnResult } from './turn'
 import { universalSelect } from './universal'
+import type { NeedleSession } from '../needle/session'
+import { draftFormat, needleExtractable, structureAnswer } from '../needle/structure'
 
 export { runTurn } from './turn'
 export type { TurnOptions, TurnResult } from './turn'
@@ -49,6 +54,11 @@ export interface AgentOptions {
   toolTimeoutMs?: number
   outputSchema?: JsonSchema
   grammar?: string
+  /** The tool model, when the run has one. Absent, every constrained step is the baseline model's. */
+  needle?: NeedleSession
+  toolConfidence?: number
+  /** Draft-then-structure for the schema'd ANSWER too. Off unless asked for: see structure.ts. */
+  needleAnswers?: boolean
 }
 
 export interface AgentResult {
@@ -70,6 +80,15 @@ function parseArgs(raw: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+/** `text` added to the closing user message, for a request that must not add a second one. */
+function appendToLastUser(messages: ChatMessage[], text: string): ChatMessage[] {
+  const last = messages[messages.length - 1]
+  if (!last || last.role !== 'user') return [...messages, { role: 'user', content: text }]
+  const content =
+    typeof last.content === 'string' ? `${last.content}\n\n${text}` : [...last.content, { type: 'text' as const, text }]
+  return [...messages.slice(0, -1), { ...last, content }]
 }
 
 async function withTimeout<T>(work: Promise<T>, ms: number, signal: AbortSignal): Promise<T> {
@@ -144,7 +163,13 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
       assistant = turn.message
       finish = turn.finishReason
     } else if (useTools && opts.toolMode === 'universal') {
-      const call = await universalSelect({ ...turnBase, messages, registry: opts.registry })
+      const call = await universalSelect({
+        ...turnBase,
+        messages,
+        registry: opts.registry,
+        needle: opts.needle,
+        toolConfidence: opts.toolConfidence,
+      })
       if (call) {
         assistant = { role: 'assistant', content: null, tool_calls: [call] }
         finish = 'tool_calls'
@@ -201,8 +226,54 @@ export async function runAgent(opts: AgentOptions): Promise<AgentResult> {
   }
 
   let output: unknown
-  if (opts.outputSchema || opts.grammar) {
-    if (!answerOnly) {
+  let structured = false
+  let draftInView = false
+  if (opts.needle && opts.needleAnswers && opts.outputSchema && needleExtractable(opts.outputSchema)) {
+    // Author, then structure. The draft is an ordinary turn — no grammar, thinking as the
+    // effort allows — but its text is kept off the wire: a host reading `delta`s expects the
+    // answer's JSON there, and gets it below once there is one.
+    const ask = `${answerOnly ? '' : 'Now give the final answer. '}${draftFormat(opts.outputSchema)}`
+    const draftTurn = await runTurn({
+      ...turnBase,
+      emit: (event) => {
+        if (event.type !== 'delta') opts.emit(event)
+      },
+      // With no loop the user's own message is last, and a second user turn in a row is an
+      // error in templates that require roles to alternate; the layout rides on that message.
+      messages: answerOnly ? appendToLastUser(messages, ask) : [...messages, { role: 'user', content: ask }],
+    })
+    addUsage(draftTurn.usage)
+    const draft = draftTurn.message.content ?? ''
+    const result = await structureAnswer(opts.needle, opts.outputSchema, draft)
+    // The ask joins the transcript only with something after it: left alone (an empty draft)
+    // it would sit directly before the constrained request's own user message.
+    if (!answerOnly && (result.ok || draft.trim() !== '')) push({ role: 'user', content: ask })
+    if (result.ok) {
+      console.error(`[needle] answer structured (${result.ms} ms)`)
+      structured = true
+      output = result.value
+      finalText = JSON.stringify(result.value)
+      opts.emit({ type: 'delta', text: finalText })
+      push({ role: 'assistant', content: finalText })
+      if (answerOnly) {
+        iterations = 1
+        stopReason = draftTurn.finishReason === 'length' ? 'length' : 'stop'
+      }
+    } else {
+      console.error(`[needle] answer fell back: ${result.why}`)
+      if (draft.trim() !== '') {
+        // The constrained request below transcribes this draft instead of starting over.
+        push(draftTurn.message)
+        push({
+          role: 'user',
+          content: 'Now give that same answer as JSON that matches the required schema, keeping the values you wrote, and nothing else.',
+        })
+        draftInView = true
+      }
+    }
+  }
+  if (!structured && (opts.outputSchema || opts.grammar)) {
+    if (!answerOnly && !draftInView) {
       // A user turn closes the transcript before the constrained request. The model's own text
       // may be the last message here, and a chat template asked to continue after an assistant
       // turn is exactly the case llama.cpp's grammar + reasoning handling trips over

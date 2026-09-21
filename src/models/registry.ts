@@ -160,8 +160,11 @@ export function findModel(registry: Registry, query: string): ModelEntry | null 
 /** The model an `exec` will run: the query, else the default. It must be on disk. */
 export async function resolveModel(query: string | null | undefined): Promise<ModelEntry> {
   const registry = await loadRegistry()
-  const wantsDefault = !query || query === 'default'
-  const key = wantsDefault ? defaultModelId(registry) : query
+  // `OBREW_MODEL` names the baseline model for a host that configures by environment. It sits
+  // below an explicit `--model` and above the registry's default, and takes the same ids.
+  const asked = !query || query === 'default' ? process.env.OBREW_MODEL?.trim() || undefined : query
+  const wantsDefault = !asked || asked === 'default'
+  const key = wantsDefault ? defaultModelId(registry) : asked
   const entry = findModel(registry, key)
   if (!entry) {
     throw new ObrewError(

@@ -10,6 +10,7 @@
     "obrew": "./src/main.ts"
   },
   "llamacpp_tag": "b10937",
+  "needle_rev": "b274efcb211a9eef48c9a88da4b43bd569696a39",
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

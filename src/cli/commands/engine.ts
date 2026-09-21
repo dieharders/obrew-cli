@@ -7,6 +7,8 @@ import { engineStatus, installEngine, requireEngine } from '../../engine/install
 import { isAlive, listRunning, removeRunning } from '../../engine/running'
 import { acquireEngine, readShared, stopShared } from '../../engine/shared'
 import { LLAMACPP_TAG } from '../../engine/version'
+import { installNeedle } from '../../needle/install'
+import { listNeedles, stopAllNeedles } from '../../needle/sidecar'
 import { resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig, VARIANTS } from '../../shared/config'
 import { UsageError } from '../../shared/errors'
@@ -17,10 +19,12 @@ import { createOutput } from '../output'
 import { engineCommand } from './exec'
 
 const HELP = `obrew engine install [--variant cuda|cpu|vulkan|metal] [--tag bNNNN] [--json]
+obrew engine install --needle   install only the tool model (needle3) and its runner
 obrew engine status [--json]
 obrew engine start [--model <id>] [-c key=value ...]   start (or reuse) the warm shared engine;
                              -c engine_console=true (Windows) shows its console window
-obrew engine stop            stop the shared engine and every llama-server obrew started
+obrew engine stop            stop the shared engine, every llama-server obrew started, and the
+                             tool model's side-cars
 obrew engine log             print the llama-server log path and its tail`
 
 export async function runEngine(argv: string[]): Promise<number> {
@@ -30,6 +34,7 @@ export async function runEngine(argv: string[]): Promise<number> {
     variant: { type: 'string' },
     tag: { type: 'string' },
     model: { type: 'string' },
+    needle: { type: 'boolean', default: false },
     config: { type: 'string', multiple: true, short: 'c' },
   } as const)
   if (values.help) {
@@ -45,6 +50,15 @@ export async function runEngine(argv: string[]): Promise<number> {
       const onSignal = () => controller.abort()
       process.once('SIGINT', onSignal)
       try {
+        if (values.needle) {
+          const needle = await installNeedle({
+            signal: controller.signal,
+            onLog: (message) => out.event({ type: 'setup.log', message }),
+            onProgress: (file, received, total) => out.event({ type: 'download.progress', file, received, total }),
+          })
+          out.event({ type: 'setup.done', ok: needle !== null, message: needle ? `needle3 → ${needle.runner}` : 'no needle3 runner for this platform' })
+          return needle ? 0 : 1
+        }
         const record = await installEngine({
           tag: values.tag,
           variant: values.variant ? oneOf(values.variant, VARIANTS, '--variant') : undefined,
@@ -64,8 +78,9 @@ export async function runEngine(argv: string[]): Promise<number> {
       const running = (await listRunning()).filter((r) => isAlive(r.pid))
       const shared = await readShared()
       const sharedLive = shared && isAlive(shared.pid) ? shared : null
+      const needles = (await listNeedles()).filter((n) => isAlive(n.pid))
       if (values.json) {
-        console.log(JSON.stringify({ ...status, pinnedTag: LLAMACPP_TAG, running, shared: sharedLive }))
+        console.log(JSON.stringify({ ...status, pinnedTag: LLAMACPP_TAG, running, shared: sharedLive, needles }))
         return 0
       }
       console.log(status.installed ? `installed: ${status.tag} (${status.variant})\n  ${status.binary}` : `not installed (pinned tag ${LLAMACPP_TAG})`)
@@ -73,7 +88,9 @@ export async function runEngine(argv: string[]): Promise<number> {
         const idle = Math.round((Date.now() - sharedLive.lastUsed) / 1000)
         console.log(`shared: pid ${sharedLive.pid} port ${sharedLive.port} ${sharedLive.model} (idle ${idle} s)`)
       }
-      for (const r of running) if (!sharedLive || r.pid !== sharedLive.pid) console.log(`running: pid ${r.pid} port ${r.port} ${r.model}`)
+      for (const n of needles) console.log(`needle: pid ${n.pid} port ${n.port} ${n.model} [${n.tools.join(', ')}]`)
+      const listed = new Set([sharedLive?.pid, ...needles.map((n) => n.pid)])
+      for (const r of running) if (!listed.has(r.pid)) console.log(`running: pid ${r.pid} port ${r.port} ${r.model}`)
       return 0
     }
     case 'start': {
@@ -100,6 +117,7 @@ export async function runEngine(argv: string[]): Promise<number> {
     case 'stop': {
       let stopped = 0
       if (await stopShared()) stopped++
+      stopped += await stopAllNeedles()
       for (const r of await listRunning()) {
         if (isAlive(r.pid)) {
           try {

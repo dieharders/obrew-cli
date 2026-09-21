@@ -51,13 +51,29 @@ export async function spawnDetached(argv: string[], opts: DetachOptions): Promis
   if (process.platform === 'win32') {
     const commandLine = argv.map(winQuote).join(' ')
     const createFlags = opts.console ? CREATE_NEW_CONSOLE : DETACHED_PROCESS
+    // A WMI-created process does NOT inherit this process's environment: the provider host
+    // builds it. So variables the child must see (`opts.env`) are handed to WMI explicitly — as
+    // the whole merged block, which is right whether `EnvironmentVariables` replaces the
+    // default environment or extends it.
+    const envBlock =
+      opts.env && Object.keys(opts.env).length > 0
+        ? Object.entries({ ...process.env, ...opts.env })
+            .filter(([k, v]) => v !== undefined && k !== '' && !k.startsWith('=') && !/[\r\n]/.test(v))
+            .map(([k, v]) => `'${`${k}=${v}`.replace(/'/g, "''")}'`)
+            .join(',')
+        : null
+    const startup = envBlock
+      ? `@{ CreateFlags = [uint32]${createFlags}; EnvironmentVariables = [string[]]@(${envBlock}) }`
+      : `@{ CreateFlags = [uint32]${createFlags} }`
     const script =
-      `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ CreateFlags = [uint32]${createFlags} }; ` +
+      `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property ${startup}; ` +
       `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ ` +
       `CommandLine = '${commandLine.replace(/'/g, "''")}'; CurrentDirectory = '${opts.cwd.replace(/'/g, "''")}'; ProcessStartupInformation = $si }; ` +
       `if ($r.ReturnValue -ne 0) { Write-Error ("Win32_Process.Create failed: " + $r.ReturnValue); exit 1 }; Write-Output $r.ProcessId`
-    const proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-      stdin: 'ignore',
+    // With an environment block the script can outgrow the 32K command line, so it goes in on
+    // stdin (`-Command -`) instead of as an argument.
+    const proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', envBlock ? '-' : script], {
+      stdin: envBlock ? new TextEncoder().encode(script + '\n') : 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
       windowsHide: true,
