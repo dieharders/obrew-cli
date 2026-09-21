@@ -42,10 +42,18 @@ export class ToolRegistry {
     return this.list().map(toolSchema)
   }
 
-  /** Markdown cards for the universal (schema-constrained) selection step. */
+  /**
+   * Markdown cards for the universal selection step: what each tool is FOR, and nothing else.
+   *
+   * The cards once carried every tool's JSON Schema, re-read on every step of the loop to pick
+   * a name. A host with a strict schema made that untenable — motionbuff's build_slide is a
+   * union of sixteen treatments, ~20 KB, some 5,000 tokens per choice — and it was never the
+   * right place for it: the schema matters when the arguments are WRITTEN, and that request
+   * now shows the chosen tool's schema alone (see universal.ts).
+   */
   markdown(): string {
     return this.list()
-      .map((t) => `### ${t.name}\n${t.description}\n\nArguments (JSON Schema): ${JSON.stringify(t.inputSchema)}`)
+      .map((t) => `### ${t.name}\n${t.description}`)
       .join('\n\n')
   }
 }

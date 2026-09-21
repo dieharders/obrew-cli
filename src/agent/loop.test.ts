@@ -13,6 +13,7 @@ import { freePort } from '../engine/ports'
 import type { ExecEvent } from '../shared/events'
 import { generationFor } from './effort'
 import { runAgent, type AgentOptions } from './loop'
+import { discriminatedUnion } from './universal'
 import { builtinRegistry, ToolRegistry } from './tools/registry'
 import type { Tool } from './tools/types'
 
@@ -171,6 +172,65 @@ describe('runAgent', () => {
     )
     expect(reqs[0]!.max_tokens).toBe(512)
     expect(reqs[1]!.max_tokens).toBe(gen.maxTokens)
+  })
+
+  test('universal: the cards say what each tool is for; only the fill sees a schema, and only the chosen one', async () => {
+    const client = await start([{ text: '{"tool":"Read"}' }, { text: '{"path":"src/main.ts"}' }, { text: '{"tool":"none"}' }, { text: 'ok' }])
+    await runAgent({ ...base(client, builtinRegistry('Read,Grep'), []), toolMode: 'universal' })
+    const reqs = await requests()
+    const lastText = (r: Record<string, unknown>) => (r.messages as Array<{ content: string }>).at(-1)!.content
+    expect(lastText(reqs[0]!)).toContain('### Read')
+    expect(lastText(reqs[0]!)).toContain('### Grep')
+    expect(lastText(reqs[0]!)).not.toContain('"properties"')
+    expect(lastText(reqs[1]!)).toContain('Its arguments (JSON Schema): {')
+    expect(lastText(reqs[1]!)).toContain('"path"')
+    expect(lastText(reqs[1]!)).not.toContain('"pattern"') // Grep's
+  })
+
+  // The shape motionbuff publishes for build_slide: a union told apart by a constant field.
+  test('universal: a union tool is narrowed to a branch before it is filled', async () => {
+    const registry = new ToolRegistry()
+    let received: unknown
+    registry.add({
+      name: 'build',
+      description: 'build a slide',
+      inputSchema: {
+        type: 'object',
+        $defs: { id: { type: 'string', enum: ['s-01'] }, item: { type: 'object', properties: { num: { type: 'string' } } }, unused: { type: 'number' } },
+        anyOf: [
+          { type: 'object', properties: { id: { $ref: '#/$defs/id' }, treatment: { const: 'cover' }, params: { type: 'object', properties: { headline: { type: 'string' } } } }, required: ['id', 'treatment', 'params'] },
+          { type: 'object', properties: { id: { $ref: '#/$defs/id' }, treatment: { const: 'agenda' }, params: { type: 'object', properties: { headline: { type: 'string' } } }, children: { type: 'array', items: { $ref: '#/$defs/item' } } }, required: ['id', 'treatment', 'params'] },
+        ],
+      },
+      execute: async (args) => {
+        received = args
+        return { content: 'built' }
+      },
+    })
+    const client = await start([
+      { text: '{"tool":"build"}' },
+      { text: '{"treatment":"agenda"}' },
+      { text: '{"id":"s-01","treatment":"agenda","params":{"headline":"Agenda"}}' },
+      { text: '{"tool":"none"}' },
+      { text: 'ok' },
+    ])
+    await runAgent({ ...base(client, registry, []), toolMode: 'universal' })
+    const reqs = await requests()
+    expect(JSON.stringify(reqs[1]!.response_format)).toContain('"enum":["cover","agenda"]')
+    expect(reqs[1]!.max_tokens).toBe(512)
+    const filled = JSON.stringify(reqs[2]!.response_format)
+    expect(filled).toContain('"const":"agenda"')
+    expect(filled).not.toContain('"const":"cover"')
+    // The branch carries the $defs it points at, and no others.
+    expect(filled).toContain('"item"')
+    expect(filled).not.toContain('"unused"')
+    expect((reqs[2]!.messages as Array<{ content: string }>).at(-1)!.content).toContain('"const":"agenda"')
+    expect(received).toEqual({ id: 's-01', treatment: 'agenda', params: { headline: 'Agenda' } })
+  })
+
+  test('universal: a union with no constant field in common is filled whole', () => {
+    expect(discriminatedUnion({ anyOf: [{ properties: { a: { const: 'x' } } }, { properties: { b: { const: 'y' } } }] })).toBeNull()
+    expect(discriminatedUnion({ type: 'object', properties: { a: { type: 'string' } } })).toBeNull()
   })
 
   test('universal: a choose cut off at max_tokens is reported on stderr and answered without a tool', async () => {

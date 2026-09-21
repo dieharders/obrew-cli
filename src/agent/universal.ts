@@ -4,9 +4,17 @@
  * `universal_call`), for models whose chat template has no tool support, or when the user
  * asks for it with `-c tool_mode=universal`.
  *
- *   1. CHOOSE  — decoded under `{ tool: <enum of names | "none">, reason }` after reading
- *                markdown cards for every tool, its length bounded (see REASON_MAX_CHARS).
- *   2. FILL    — decoded under the chosen tool's own inputSchema.
+ *   1. CHOOSE  — decoded under `{ tool: <enum of names | "none">, reason }` after reading a
+ *                name + description card for every tool, its length bounded (REASON_MAX_CHARS).
+ *   1b. BRANCH — only when the chosen tool's schema is a union told apart by a constant field
+ *                (motionbuff's build_slide: one branch per `treatment`): that field is chosen
+ *                first, so the next step reads and writes one branch instead of all of them.
+ *   2. FILL    — decoded under the chosen tool's (or branch's) schema, which the prompt SHOWS.
+ *
+ * Each step is handed only what it decides with. The schemas used to ride in every CHOOSE card
+ * and in no FILL prompt at all, which was backwards: a name was picked after re-reading every
+ * argument of every tool, and the arguments were then written by a model that had been shown
+ * none of them — the grammar forced the keys, but their descriptions and limits were unseen.
  *
  * Both requests run with thinking off (see effort.ts). "none" means the model wants to answer
  * in prose; the loop then runs an ordinary unconstrained turn.
@@ -17,6 +25,7 @@ import { jsonSchemaBody } from './constrain'
 import { runTurn } from './turn'
 import type { ChatMessage, ToolCall } from './messages'
 import type { ToolRegistry } from './tools/registry'
+import type { JsonSchema } from './tools/types'
 
 export interface UniversalOptions {
   client: EngineClient
@@ -82,6 +91,51 @@ async function constrainedJson(
   }
 }
 
+/**
+ * A schema is shown to the model that fills it while it is a card's worth of reading. Past this
+ * it is decoded under all the same and only not shown; a union is narrowed to a branch first,
+ * so in practice this is a backstop for one very large flat schema.
+ */
+const FILL_SCHEMA_MAX_CHARS = 6_000
+
+type Json = Record<string, unknown>
+
+/** The `$defs` a schema actually points at, so a branch carries its own and no one else's. */
+function referencedDefs(node: unknown, defs: Json, found: Json = {}): Json {
+  if (Array.isArray(node)) for (const item of node) referencedDefs(item, defs, found)
+  else if (node && typeof node === 'object') {
+    for (const [key, value] of Object.entries(node)) {
+      const name = key === '$ref' && typeof value === 'string' ? /^#\/\$defs\/(.+)$/.exec(value)?.[1] : undefined
+      if (name !== undefined && name in defs && !(name in found)) {
+        found[name] = defs[name]
+        referencedDefs(defs[name], defs, found)
+      } else referencedDefs(value, defs, found)
+    }
+  }
+  return found
+}
+
+/**
+ * A union whose branches are told apart by one constant field: the field, and each value's
+ * branch made self-contained. Null for every other schema.
+ */
+export function discriminatedUnion(schema: JsonSchema): { key: string; branches: Map<string, JsonSchema> } | null {
+  const union = (schema.anyOf ?? schema.oneOf) as Json[] | undefined
+  if (!Array.isArray(union) || union.length < 2) return null
+  const constsOf = (branch: Json) =>
+    Object.entries((branch.properties ?? {}) as Record<string, Json>).filter(([, p]) => p && typeof p.const === 'string')
+  const key = constsOf(union[0]!).find(([k]) => union.every((b) => constsOf(b).some(([bk]) => bk === k)))?.[0]
+  if (!key) return null
+  const defs = (schema.$defs ?? {}) as Json
+  const branches = new Map<string, JsonSchema>()
+  for (const branch of union) {
+    const value = (branch.properties as Record<string, Json>)[key]!.const as string
+    const own = referencedDefs(branch, defs)
+    branches.set(value, Object.keys(own).length > 0 ? { ...branch, $defs: own } : branch)
+  }
+  return branches.size === union.length ? { key, branches } : null
+}
+
 /** One selection+fill round. Returns the call to make, or null for "answer in prose". */
 export async function universalSelect(opts: UniversalOptions): Promise<ToolCall | null> {
   const names = opts.registry.list().map((t) => t.name)
@@ -117,17 +171,40 @@ export async function universalSelect(opts: UniversalOptions): Promise<ToolCall 
   // result is something to act on. Said every time rather than only after a failure: the loop
   // does not know here whether the last result was an error, and the sentence costs nothing when
   // there was none.
+  let schema = tool.inputSchema
+  const union = discriminatedUnion(schema)
+  if (union) {
+    const values = [...union.branches.keys()]
+    const picked = (await constrainedJson(
+      opts,
+      [
+        ...opts.messages,
+        {
+          role: 'user',
+          content: `You are calling the tool "${tool.name}". ${tool.description}\n\nFirst choose its "${union.key}": one of ${values.join(', ')}. Reply with JSON only.`,
+        },
+      ],
+      { type: 'object', properties: { [union.key]: { type: 'string', enum: values } }, required: [union.key], additionalProperties: false },
+      'choose',
+      CHOOSE_MAX_TOKENS,
+    )) as Record<string, string> | null
+    // No answer leaves the whole union in force: slower to read, never less correct.
+    schema = union.branches.get(picked?.[union.key] ?? '') ?? schema
+  }
+  const shown = JSON.stringify(schema)
+
   const fillMessages: ChatMessage[] = [
     ...opts.messages,
     {
       role: 'user',
       content:
         `Call the tool "${tool.name}". ${tool.description}\n\n` +
+        (shown.length <= FILL_SCHEMA_MAX_CHARS ? `Its arguments (JSON Schema): ${shown}\n\n` : '') +
         `If an earlier call of this tool above reported a problem with its arguments, change them to fix ` +
         `exactly what it reported; never repeat arguments that already failed.\n\nReply with the JSON arguments only.`,
     },
   ]
-  const args = await constrainedJson(opts, fillMessages, tool.inputSchema, 'fill')
+  const args = await constrainedJson(opts, fillMessages, schema, 'fill')
   return {
     id: `call_${Date.now().toString(36)}`,
     type: 'function',
