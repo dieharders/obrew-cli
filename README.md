@@ -23,9 +23,9 @@ bun run dev exec resume <id> "again"   # continue a session
 obrew exec [resume <sessionId>] [--json] [--model <id>] [--effort low|medium|high]
            [-c key=value ...] [--cwd <dir>] [--system-prompt <t> | --system-prompt-file <p>]
            [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none]
-           ("<prompt>" | --input-format json)
+           [--image <path> ...] [--vision] ("<prompt>" | --input-format json)
 obrew auth status [--json]
-obrew login [--model <repo[:file]>] [--json]
+obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--json]
 obrew models list|pull <repo>[:file] [--mmproj]|rm <id>|use <id>
 obrew engine install [--variant cuda|cpu|vulkan|metal] | status | stop
 obrew sessions list|show <id>|rm <id>
@@ -98,8 +98,16 @@ swaps the engine when it differs.
 
 ## Vision, search, embeddings
 
-- `obrew exec --image still.png "what is shown?"` attaches images to a model pulled with
-  `--mmproj`. The transcript keeps a marker per image, not the bytes.
+- `obrew exec --image still.png "what is shown?"` shows the model an image, through its vision
+  projector (mmproj). `obrew login` downloads the projector the model's repo publishes for it
+  (`--no-mmproj` declines it, and later logins remember that; `--mmproj` insists, and fails
+  where there is none), `obrew models pull` only with `--mmproj`, and `obrew auth status`
+  reports it as `model.vision`. The transcript keeps a marker per image, not the bytes.
+- Having the projector is not loading it: it costs memory and load time, so only a run that
+  asks for vision loads it — `--image`, or `--vision` to let Read show the model images without
+  attaching one. `obrew engine start --vision` and `obrew serve --vision` do the same. A warm
+  engine is reused only with the same flags, so a host that mixes image and text turns keeps one
+  engine warm by passing `--vision` on all of them.
 - `--tools Read,Grep,Glob,WebSearch` adds a DuckDuckGo-backed search tool (opt-in).
 - `obrew models pull nomic-ai/nomic-embed-text-v1.5-GGUF && obrew models use --embed <id>` sets
   an embedding model; `obrew embed --query "…" "text a" "text b"` ranks texts by cosine

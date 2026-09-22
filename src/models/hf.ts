@@ -73,6 +73,12 @@ export async function listRepoFiles(repoId: string, token?: string, signal?: Abo
 export const isGguf = (path: string) => path.toLowerCase().endsWith('.gguf')
 export const isMmproj = (path: string) => /mmproj/i.test(path) && isGguf(path)
 
+/** A Hub path's last segment, which is the name a file is stored under (flat, per repo). */
+export const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+/** A Hub path's directory, `''` at the top of the repo. */
+const dirName = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf('/')))
+const words = (text: string) => text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+
 /** Quantisation preference when the user did not name a file. */
 const PREFERRED_QUANTS = ['Q4_K_M', 'Q4_K_S', 'Q5_K_M', 'Q8_0', 'Q6_K', 'Q4_0', 'F16', 'BF16']
 
@@ -113,4 +119,28 @@ export function chooseMmproj(files: HfFile[], explicit: string | null): HfFile {
   if (projs.length === 0) throw new ObrewError('bad_request', 'no mmproj file in that repo')
   // `f16` but not `bf16`: the plain half-precision projector is the safe default.
   return projs.find((f) => /(?<![a-z])f16/i.test(f.path)) ?? projs.find((f) => /bf16/i.test(f.path)) ?? projs[0]!
+}
+
+/**
+ * The projector the repo publishes for this model, or null when none clearly is its own. A
+ * repo can hold several models, in subfolders or side by side, and llama-server does not start
+ * with another model's projector — so only one in the model's own directory counts, and only
+ * when its name names no model (`mmproj-F16.gguf`, `mmproj-model-f16.gguf`) or names this one
+ * (`mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf` beside `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf`, not
+ * beside the text-only `Qwen2.5-7B-Instruct-Q4_K_M.gguf`). Anything less certain is left for
+ * `--mmproj` to ask for.
+ */
+export function projectorFor(files: HfFile[], modelPath: string): HfFile | null {
+  const dir = dirName(modelPath)
+  const model = new Set(words(fileName(modelPath)))
+  const own = files.filter((f) => isMmproj(f.path) && dirName(f.path) === dir && projectorNames(f.path).every((w) => model.has(w)))
+  return own.length > 0 ? chooseMmproj(own, null) : null
+}
+
+/** The words a projector's file name says about its model: not its precision, `mmproj`, `model`. */
+function projectorNames(path: string): string[] {
+  const stem = fileName(path)
+    .replace(/\.gguf$/i, '')
+    .replace(/[-_.](?:b?f(?:16|32)|fp(?:16|32)|i?q\d+(?:_[a-z0-9]+)*)$/i, '')
+  return words(stem).filter((w) => w !== 'mmproj' && w !== 'model')
 }
