@@ -8,7 +8,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FAKE_SERVER, tempHome } from '../../../test/fixtures/home'
 import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
-import { saveRegistry } from '../../models/registry'
+import { loadRegistry, saveRegistry } from '../../models/registry'
 import type { ExecEvent } from '../../shared/events'
 import { ExecEventSchema } from '../../shared/events'
 
@@ -35,6 +35,13 @@ async function run(args: string[], env: Record<string, string> = {}, stdin?: str
     : []
   return { events, stderr, code, stdout }
 }
+
+/** The launch flags of each engine the runs started, as the fake logs them to FAKE_LOG_ARGS. */
+const launches = async (log: string) =>
+  (await Bun.file(log).text())
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as string[])
 
 describe('obrew exec --json', () => {
   let home: Awaited<ReturnType<typeof tempHome>>
@@ -320,6 +327,25 @@ describe('obrew exec --engine shared', () => {
     await Bun.sleep(500)
     await expect(fetch(`http://127.0.0.1:${port1}/health`)).rejects.toThrow()
   }, TIMEOUT_MS)
+
+  test('engine start --vision warms the engine a --vision run reuses; a run without vision replaces it', async () => {
+    const mmproj = join(home.dir, 'models', 'org--repo', 'mmproj.gguf')
+    await writeFile(mmproj, 'GGUF')
+    const registry = await loadRegistry()
+    await saveRegistry({ ...registry, models: registry.models.map((m) => ({ ...m, mmprojPath: mmproj })) })
+    const start = Bun.spawnSync([process.execPath, MAIN, 'engine', 'start', '--vision'], { env: { ...process.env, OBREW_LLAMA_SERVER: FAKE_SERVER } })
+    expect(start.exitCode).toBe(0)
+    const states = (r: Awaited<ReturnType<typeof run>>) => r.events.filter((e) => e.type === 'engine.status').map((e) => (e as { state: string }).state)
+
+    const vision = await run(['exec', '--json', '--engine', 'shared', '--vision', '--tools', 'none', 'one'])
+    expect(vision.code).toBe(0)
+    expect(states(vision)).toEqual(['ready'])
+    // The projector is a launch flag like any other: an engine that has one is not the engine
+    // a text-only run asked for.
+    const text = await run(['exec', '--json', '--engine', 'shared', '--tools', 'none', 'two'])
+    expect(text.code).toBe(0)
+    expect(states(text)).toContain('starting')
+  }, TIMEOUT_MS)
 })
 
 describe('obrew exec --image', () => {
@@ -347,8 +373,15 @@ describe('obrew exec --image', () => {
   test('sends the image as a data URL part and keeps a marker in the transcript', async () => {
     await registry(join(home.dir, 'mmproj.gguf'))
     const log = join(home.dir, 'requests.jsonl')
-    const { events, code } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], { FAKE_LOG_REQUESTS: log, FAKE_REPLY: 'a picture' })
+    const args = join(home.dir, 'args.jsonl')
+    const { events, code } = await run(['exec', '--json', '--tools', 'none', '--image', join(home.dir, 'still.png'), 'describe'], {
+      FAKE_LOG_REQUESTS: log,
+      FAKE_LOG_ARGS: args,
+      FAKE_REPLY: 'a picture',
+    })
     expect(code).toBe(0)
+    // An image to look at is the run asking for vision: the projector is loaded for it.
+    expect((await launches(args))[0]).toContain('--mmproj')
     const req = JSON.parse((await Bun.file(log).text()).trim().split('\n')[0]!) as { messages: Array<{ role: string; content: unknown }> }
     const user = req.messages.find((m) => m.role === 'user')!
     expect(user.content).toEqual([
@@ -359,6 +392,14 @@ describe('obrew exec --image', () => {
     const show = Bun.spawnSync([process.execPath, MAIN, 'sessions', 'show', session.sessionId, '--json'], { env: process.env })
     const stored = JSON.parse(show.stdout.toString()) as { messages: Array<{ role: string; content: string }> }
     expect(stored.messages[1]!.content).toMatch(/^\[image: .*still\.png\]\ndescribe$/)
+  }, TIMEOUT_MS)
+
+  test('a run that asks for no vision does not load the projector the model has', async () => {
+    await registry(join(home.dir, 'mmproj.gguf'))
+    const args = join(home.dir, 'args.jsonl')
+    const { code } = await run(['exec', '--json', '--tools', 'none', 'describe'], { FAKE_LOG_ARGS: args })
+    expect(code).toBe(0)
+    expect((await launches(args))[0]).not.toContain('--mmproj')
   }, TIMEOUT_MS)
 
   test('a model without an mmproj drops --image with a warning and answers on text alone', async () => {
@@ -412,12 +453,15 @@ describe('obrew exec: images through Read', () => {
     })
   }
 
-  test('with a vision model, Read of a still hands the model the image', async () => {
+  const readStill = JSON.stringify([{ toolCalls: [{ name: 'Read', arguments: { path: 'stills/slide-1.png' } }] }, { text: 'a slide' }])
+
+  test('with --vision on a vision model, Read of a still hands the model the image', async () => {
     await registry(join(home.dir, 'mmproj.gguf'))
     const log = join(home.dir, 'requests.jsonl')
-    const script = JSON.stringify([{ toolCalls: [{ name: 'Read', arguments: { path: 'stills/slide-1.png' } }] }, { text: 'a slide' }])
-    const { events, code } = await run(['exec', '--json', '--cwd', cwd, 'critique'], { FAKE_SCRIPT: script, FAKE_LOG_REQUESTS: log })
+    const args = join(home.dir, 'args.jsonl')
+    const { events, code } = await run(['exec', '--json', '--vision', '--cwd', cwd, 'critique'], { FAKE_SCRIPT: readStill, FAKE_LOG_REQUESTS: log, FAKE_LOG_ARGS: args })
     expect(code).toBe(0)
+    expect((await launches(args))[0]).toContain('--mmproj')
     expect(events.find((e) => e.type === 'tool.result')).toMatchObject({ ok: true })
     const second = JSON.parse((await Bun.file(log).text()).trim().split('\n')[1]!) as { messages: Array<{ role: string; content: unknown }> }
     const last = second.messages.at(-1)!
@@ -425,11 +469,22 @@ describe('obrew exec: images through Read', () => {
     expect(JSON.stringify(last.content)).toContain('data:image/png;base64,iVBORw==')
   }, TIMEOUT_MS)
 
-  test('without a vision model, Read of a still is an error result, not a base64 dump', async () => {
-    await registry(null)
-    const script = JSON.stringify([{ toolCalls: [{ name: 'Read', arguments: { path: 'stills/slide-1.png' } }] }, { text: 'cannot see' }])
-    const { events, code } = await run(['exec', '--json', '--cwd', cwd, '--include-tool-io', 'critique'], { FAKE_SCRIPT: script })
+  test('without --vision, Read of a still is an error even though the model has its projector', async () => {
+    await registry(join(home.dir, 'mmproj.gguf'))
+    const args = join(home.dir, 'args.jsonl')
+    const { events, code } = await run(['exec', '--json', '--cwd', cwd, '--include-tool-io', 'critique'], { FAKE_SCRIPT: readStill, FAKE_LOG_ARGS: args })
     expect(code).toBe(0)
+    expect((await launches(args))[0]).not.toContain('--mmproj')
+    const result = events.find((e) => e.type === 'tool.result') as { ok: boolean; output?: string }
+    expect(result.ok).toBe(false)
+    expect(result.output).toMatch(/--vision/)
+  }, TIMEOUT_MS)
+
+  test('without a vision model, --vision is ignored with a warning and Read of a still is an error result, not a base64 dump', async () => {
+    await registry(null)
+    const { events, code, stderr } = await run(['exec', '--json', '--vision', '--cwd', cwd, '--include-tool-io', 'critique'], { FAKE_SCRIPT: readStill })
+    expect(code).toBe(0)
+    expect(stderr).toMatch(/no vision projector, so --vision is ignored/)
     const result = events.find((e) => e.type === 'tool.result') as { ok: boolean; output?: string }
     expect(result.ok).toBe(false)
     expect(result.output).toMatch(/cannot see images/)

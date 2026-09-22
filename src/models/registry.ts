@@ -32,12 +32,17 @@ export const ModelEntrySchema = z.object({
   path: z.string(),
   mmprojPath: z.string().nullable(),
   /**
-   * Whether the repo listed a vision projector the last time this entry was pulled. Absent
-   * means never checked, which is every entry written before this field existed. `obrew login`
-   * reads it to decide whether an installed model with no projector is worth one listing
-   * request: `false` is a text-only repo, and asking it again on every login would be waste.
+   * Whether the repo listed a vision projector for this model the last time this entry was
+   * pulled. Absent means never checked, which is every entry written before this field existed.
+   * `obrew login` reads it to decide whether an installed model with no projector is worth one
+   * listing request: `false` is a text-only model, and asking again on every login would be waste.
    */
   mmprojPublished: z.boolean().optional(),
+  /**
+   * `obrew login --no-mmproj` declined this model's projector. A later bare login fetches none
+   * for it, not even one it had and lost, until a pull with `--mmproj` asks for one again.
+   */
+  mmprojDeclined: z.boolean().optional(),
   sizeBytes: z.number(),
   addedAt: z.string(),
 })
@@ -66,11 +71,16 @@ export function defaultModelId(registry: Registry): string {
   return registry.models[0]?.id ?? BUILT_IN_DEFAULT_MODEL
 }
 
-/** The default model as a host should see it: which one, whether chosen, whether installed. */
-export async function defaultModel(registry: Registry): Promise<{ id: string; chosen: string | null; installed: boolean }> {
+/**
+ * The default model as a host should see it: which one, whether chosen, whether installed, and
+ * its entry when there is one, so a caller never looks it up a second time and differently.
+ */
+export async function defaultModel(
+  registry: Registry,
+): Promise<{ id: string; chosen: string | null; installed: boolean; entry: ModelEntry | null }> {
   const id = defaultModelId(registry)
   const entry = findModel(registry, id)
-  return { id, chosen: registry.default, installed: entry ? await isOnDisk(entry) : false }
+  return { id, chosen: registry.default, installed: entry ? await isOnDisk(entry) : false, entry }
 }
 
 /**
@@ -140,7 +150,10 @@ export async function removeModel(query: string): Promise<ModelEntry> {
   if (registry.default === entry.id) registry.default = null
   await saveRegistry(registry)
   await rm(entry.path, { force: true })
-  if (entry.mmprojPath) await rm(entry.mmprojPath, { force: true })
+  // Every quant of a repo shares its projector (`models/<org>--<repo>/mmproj-F16.gguf`), so it
+  // goes with the last entry that uses it, not with the first one removed.
+  const shared = registry.models.some((m) => m.mmprojPath === entry.mmprojPath)
+  if (entry.mmprojPath && !shared) await rm(entry.mmprojPath, { force: true })
   return entry
 }
 

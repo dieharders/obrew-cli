@@ -30,6 +30,11 @@ export interface ServeOptions {
   port: number
   /** Model to preload; otherwise the first request loads the registry default. */
   model?: string
+  /**
+   * Load each model with its vision projector, for requests that send images (`--vision`). Off
+   * by default, as for `exec`: the projector costs memory for as long as the engine runs.
+   */
+  vision?: boolean
   idleTtlMs: number
   log?: (message: string) => void
 }
@@ -72,7 +77,8 @@ export class ObrewServer {
     this.loading = (async () => {
       const config = await loadConfig()
       const engine = await requireEngine(config)
-      const mmprojPath = await projectorPath(model)
+      const mmprojPath = this.opts.vision ? await projectorPath(model) : null
+      if (this.opts.vision && !mmprojPath) this.log(`${model.id} has no vision projector, so it answers text only; pull it with --mmproj to see images`)
       const loadOpts = loadOptionsFrom({}, {
         ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
         ...(mmprojPath ? { mmprojPath } : {}),

@@ -7,7 +7,7 @@ import { engineStatus, installEngine, requireEngine } from '../../engine/install
 import { isAlive, listRunning, removeRunning } from '../../engine/running'
 import { acquireEngine, readShared, stopShared } from '../../engine/shared'
 import { LLAMACPP_TAG } from '../../engine/version'
-import { resolveModel } from '../../models/registry'
+import { projectorPath, resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig, VARIANTS } from '../../shared/config'
 import { UsageError } from '../../shared/errors'
 import { logsDir } from '../../shared/paths'
@@ -18,7 +18,8 @@ import { engineCommand } from './exec'
 
 const HELP = `obrew engine install [--variant cuda|cpu|vulkan|metal] [--tag bNNNN] [--json]
 obrew engine status [--json]
-obrew engine start [--model <id>] [-c key=value ...]   start (or reuse) the warm shared engine;
+obrew engine start [--model <id>] [--vision] [-c key=value ...]   start (or reuse) the warm shared engine;
+                             --vision loads the model's projector, as \`exec --vision\` does;
                              -c engine_console=true (Windows) shows its console window
 obrew engine stop            stop the shared engine and every llama-server obrew started
 obrew engine log             print the llama-server log path and its tail`
@@ -30,6 +31,7 @@ export async function runEngine(argv: string[]): Promise<number> {
     variant: { type: 'string' },
     tag: { type: 'string' },
     model: { type: 'string' },
+    vision: { type: 'boolean', default: false },
     config: { type: 'string', multiple: true, short: 'c' },
   } as const)
   if (values.help) {
@@ -81,9 +83,13 @@ export async function runEngine(argv: string[]): Promise<number> {
       const model = await resolveModel(values.model)
       const engine = await requireEngine(config)
       const pairs = parseConfigPairs(values.config)
+      // The same launch flags `exec` would use, so the run it warms up for reuses it: the
+      // projector only when asked for, and only as it is on disk.
+      const mmprojPath = values.vision ? await projectorPath(model) : null
+      if (values.vision && !mmprojPath) console.error(`warning: ${model.id} has no vision projector, so --vision is ignored; pull it with --mmproj to see images`)
       const loadOpts = loadOptionsFrom(pairs, {
         ctxSize: config.ctxSize ?? DEFAULT_CTX_SIZE,
-        ...(model.mmprojPath ? { mmprojPath: model.mmprojPath } : {}),
+        ...(mmprojPath ? { mmprojPath } : {}),
       })
       const handle = await acquireEngine({
         mode: 'shared',

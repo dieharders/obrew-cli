@@ -49,8 +49,10 @@ const HELP = `obrew exec [resume <sessionId>] [--json] [options] "<prompt>"
                              as one JSON object, instead of the prompt argument and the flags
                              above; "outputSchema" is --output-schema with no argv size limit
   --tools <list|none>        built-in tools: Read,Grep,Glob (default), WebSearch, or none
-  --image <path>             attach an image (png/jpg/gif/webp); needs a model pulled with
-                             --mmproj. Repeatable.
+  --image <path>             attach an image (png/jpg/gif/webp); the run loads the model's
+                             vision projector to see it. Repeatable.
+  --vision                   load the model's vision projector without attaching an image, so
+                             Read can show the model images. Off by default: it costs memory.
   --mcp-server name=<url>    MCP server over streamable HTTP; or name=stdio:<command …>.
                              Its tools appear as mcp__<name>__<tool>. Repeatable.
   --max-iterations <n>       tool-loop cap (default 25)
@@ -91,6 +93,7 @@ const OPTIONS = {
   'include-tool-io': { type: 'boolean', default: false },
   engine: { type: 'string' },
   image: { type: 'string', multiple: true },
+  vision: { type: 'boolean', default: false },
 } as const
 
 const ENGINE_MODES = ['shared', 'ephemeral'] as const
@@ -237,15 +240,19 @@ export async function runExec(argv: string[]): Promise<number> {
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
-    // The projector as it is on disk, not as the registry remembers it: a recorded path whose
-    // file is gone would stop llama-server from starting at all.
-    const mmprojPath = await projectorPath(model)
     let imagePaths = (values.image ?? []).map((p) => resolve(cwd, p))
-    if (imagePaths.length > 0 && !mmprojPath) {
+    // The projector is loaded only for a run that asks for vision, with `--vision` or an image
+    // to look at: it costs memory and load time, and llama-server gives up context shift and
+    // cache reuse while one is loaded. As it is on disk, not as the registry remembers it: a
+    // recorded path whose file is gone would stop llama-server from starting at all.
+    const wantsVision = values.vision || imagePaths.length > 0
+    const mmprojPath = wantsVision ? await projectorPath(model) : null
+    if (wantsVision && !mmprojPath) {
       // Degrade, loudly, rather than fail: a host attaches a still to every critique turn, and
       // a model pulled without its projector would otherwise fail the whole job on the first
       // one. The prompt still names the file; the turn runs on text alone.
-      out.log(`warning: ${model.id} has no vision projector, so --image is ignored; pull it with --mmproj to see images`)
+      const ignored = imagePaths.length > 0 ? '--image' : '--vision'
+      out.log(`warning: ${model.id} has no vision projector, so ${ignored} is ignored; pull it with --mmproj to see images`)
       imagePaths = []
     }
     const images = await Promise.all(imagePaths.map(imagePart))

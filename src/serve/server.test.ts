@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FAKE_SERVER, tempHome } from '../../test/fixtures/home'
-import { stopShared } from '../engine/shared'
+import { readShared, stopShared } from '../engine/shared'
 import { loadRegistry, saveRegistry } from '../models/registry'
 import { ObrewServer } from './server'
 
@@ -73,6 +73,33 @@ describe('obrew serve', () => {
     // the engine we just replaced frees its port immediately, so the new one often rebinds it.
     expect(status2.loaded).toBe('o/r:b.gguf')
     expect(status2.port).toBeGreaterThan(0)
+  })
+
+  test('a model is loaded with its vision projector only under --vision', async () => {
+    const mmproj = join(home.dir, 'models', 'o--r', 'mmproj.gguf')
+    await writeFile(mmproj, 'GGUF')
+    const registry = await loadRegistry()
+    await saveRegistry({ ...registry, models: registry.models.map((m) => ({ ...m, mmprojPath: mmproj })) })
+    const chat = async (at: string) => {
+      const res = await fetch(`${at}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      await res.text()
+      return res.status
+    }
+    // The shared engine's key is its launch flags, which is where a projector would show.
+    expect(await chat(base)).toBe(200)
+    expect((await readShared())?.key).not.toContain('--mmproj')
+    const vision = new ObrewServer({ host: '127.0.0.1', port: 0, idleTtlMs: 60_000, vision: true })
+    await vision.start()
+    try {
+      expect(await chat(`http://127.0.0.1:${vision.port}`)).toBe(200)
+      expect((await readShared())?.key).toContain(`--mmproj ${mmproj}`)
+    } finally {
+      await vision.stop()
+    }
   })
 
   test('an unknown model is 404, junk body 400', async () => {

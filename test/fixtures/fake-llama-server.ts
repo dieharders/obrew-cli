@@ -15,6 +15,7 @@
  *                          last repeats). Each: { text?, reasoning?, toolCalls?: [{name,
  *                          arguments}], finish? }. Overrides FAKE_REPLY / FAKE_REASONING.
  *   FAKE_LOG_REQUESTS=<p>  append every chat request body as a JSON line to this file
+ *   FAKE_LOG_ARGS=<p>      append this process's launch flags as a JSON array line to this file
  *   FAKE_LINGER_MS=<n>     on SIGTERM close the listener but stay alive for n ms, leaving any
  *                          open keep-alive connection up and answering nothing on it — how
  *                          llama-server behaves while it tears down GPU buffers
@@ -27,6 +28,7 @@ const port = Number(argv[portIdx + 1] ?? 0)
 const model = argv[argv.indexOf('-m') + 1] ?? 'fake'
 
 const env = process.env
+if (env.FAKE_LOG_ARGS) appendFileSync(env.FAKE_LOG_ARGS, JSON.stringify(argv) + '\n')
 const exitCode = Number(env.FAKE_EXIT_CODE ?? '')
 if (Number.isFinite(exitCode) && env.FAKE_EXIT_CODE) {
   process.stderr.write('fake: srv load_model: failed to load model\n')

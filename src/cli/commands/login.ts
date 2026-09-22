@@ -1,18 +1,21 @@
 /**
- * `obrew login [--model <repo[:file]>] [--variant …] [--json]`
+ * `obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--variant …] [--json]`
  *
  * Idempotent setup: install the engine if it is missing, then make sure the default model (or
  * the one named) is on disk and make it the default. The default is whichever model the user or
  * a host chose, and the built-in one on a fresh install, so a choice survives the next login
  * rather than being replaced by the built-in model. It is downloaded when missing or not the
  * same file; that one model is all login downloads, along with its vision projector when its
- * repo publishes one (`--no-mmproj` skips that; `--mmproj` insists on one and fails without). This is what a host's "Sign in" button
- * runs, in a real terminal so the progress is visible.
+ * repo publishes one for it (`--no-mmproj` declines that, for later logins too; `--mmproj`
+ * insists on one and fails without). Having the projector is not loading it: a run does that
+ * only when it asks for vision. This is what a host's "Sign in" button runs, in a real terminal
+ * so the progress is visible.
  */
 import { pullModel } from '../../models/pull'
 import { defaultModelId, loadRegistry } from '../../models/registry'
 import { findEngine, installEngine } from '../../engine/install'
 import { hfToken, loadConfig, VARIANTS } from '../../shared/config'
+import { UsageError } from '../../shared/errors'
 import { track, untrack } from '../../shared/proc'
 import { oneOf, parse } from '../args'
 import { createOutput } from '../output'
@@ -31,6 +34,7 @@ export async function runLogin(argv: string[]): Promise<number> {
     console.log('obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--variant cuda|cpu|vulkan|metal] [--json]')
     return 0
   }
+  if (values.mmproj && values['no-mmproj']) throw new UsageError('--mmproj and --no-mmproj cannot be combined')
   const out = createOutput(values.json)
   const controller = new AbortController()
   track(controller)
@@ -57,15 +61,16 @@ export async function runLogin(argv: string[]): Promise<number> {
 
     // The model is fetched whenever this machine does not have it on disk as downloaded, and
     // pullModel fetches nothing when it does. No other model is looked at. A projector comes
-    // with it wherever the repo publishes one, because a host's setup button runs a bare `obrew
-    // login` and cannot pass the strict `--mmproj` without failing a text-only default. An
-    // installed model that was never checked for one costs a single listing request. `makeDefault` is
-    // applied in the same registry write as the install, so a pull running against `obrew
-    // serve` at that moment cannot be lost between the two.
+    // with it wherever the repo publishes one for it, because a host's setup button runs a bare
+    // `obrew login` and cannot pass the strict `--mmproj` without failing a text-only default.
+    // That projector never fails the login: an installed model that was never checked for one
+    // costs one listing request, bounded in time, and a failed download leaves the model
+    // installed as text. `makeDefault` is applied in the same registry write as the install, so
+    // a pull running against `obrew serve` at that moment cannot be lost between the two.
     const entry = await pullModel({
       spec: values.model ?? defaultModelId(await loadRegistry()),
       mmproj: values.mmproj,
-      mmprojIfPublished: !values['no-mmproj'],
+      optionalMmproj: values['no-mmproj'] ? 'skip' : 'fetch',
       makeDefault: true,
       token: hfToken(config),
       signal: controller.signal,

@@ -1,5 +1,5 @@
 /**
- * `obrew serve [--host 127.0.0.1] [--port 8008] [--model <id>] [--idle-ttl <seconds>]`
+ * `obrew serve [--host 127.0.0.1] [--port 8008] [--model <id>] [--vision] [--idle-ttl <seconds>]`
  */
 import { DEFAULT_IDLE_TTL_MS } from '../../engine/shared'
 import { ObrewServer } from '../../serve/server'
@@ -12,16 +12,18 @@ export async function runServe(argv: string[]): Promise<number> {
     host: { type: 'string', default: '127.0.0.1' },
     port: { type: 'string', default: '8008' },
     model: { type: 'string' },
+    vision: { type: 'boolean', default: false },
     'idle-ttl': { type: 'string' },
   } as const)
   if (values.help) {
-    console.log('obrew serve [--host 127.0.0.1] [--port 8008] [--model <id>] [--idle-ttl <seconds>]')
+    console.log('obrew serve [--host 127.0.0.1] [--port 8008] [--model <id>] [--vision] [--idle-ttl <seconds>]')
     return 0
   }
   const server = new ObrewServer({
     host: values.host,
     port: asInt(values.port, '--port'),
     model: values.model,
+    vision: values.vision,
     idleTtlMs: values['idle-ttl'] ? asInt(values['idle-ttl'], '--idle-ttl') * 1000 : DEFAULT_IDLE_TTL_MS,
     log: (m) => console.error(`[serve] ${m}`),
   })
