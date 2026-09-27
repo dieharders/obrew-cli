@@ -10,6 +10,7 @@ import pkg from '../package.json' with { type: 'json' }
 import { ObrewError, UsageError } from './shared/errors'
 import { hookShutdown } from './shared/proc'
 import { runAuth } from './cli/commands/auth'
+import { runDecide } from './cli/commands/decide'
 import { runEmbed } from './cli/commands/embed'
 import { runEngine } from './cli/commands/engine'
 import { runExec } from './cli/commands/exec'
@@ -28,6 +29,7 @@ Usage:
   obrew engine install|status|start|stop [...]
   obrew serve [--host] [--port] [--model]
   obrew embed [--model <id>] [--query <text>] [--image <path>] <text …>
+  obrew decide install|status|stop|classify|extract [...]
   obrew sessions list|show|rm [...]
   obrew --version
 
@@ -66,6 +68,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runServe(rest)
       case 'embed':
         return await runEmbed(rest)
+      case 'decide':
+        return await runDecide(rest)
       default:
         throw new UsageError(`unknown command "${command}"\n\n${HELP}`)
     }
