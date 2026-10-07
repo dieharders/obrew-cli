@@ -12,8 +12,9 @@ export default tseslint.config(
       globals: { ...globals.node },
     },
     rules: {
-      // `^_` matches what tsc already does with noUnusedParameters.
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      // `^_` matches what tsc already does with noUnusedParameters. ignoreRestSiblings lets
+      // `const { drop, ...rest } = obj` omit keys without tripping the rule.
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', ignoreRestSiblings: true }],
     },
   },
 )
