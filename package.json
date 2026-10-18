@@ -10,6 +10,8 @@
     "obrew": "./src/main.ts"
   },
   "llamacpp_tag": "b10937",
+  "qwentts_tag": "v0.1.0",
+  "qwentts_repo": "dieharders/qwentts.cpp",
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -14,7 +14,8 @@ const HELP = `obrew models list [--json]
 obrew models pull <org/repo[:file.gguf]> [--mmproj] [--mmproj-file <name>] [--json]
 obrew models rm <id>
 obrew models use <id>            make it the default chat model
-obrew models use --embed <id>    make it the embedding model`
+obrew models use --embed <id>    make it the embedding model
+obrew models use --asr <id>      make it the transcription model (pull it with --mmproj)`
 
 export async function runModels(argv: string[]): Promise<number> {
   const { values, positionals } = parse(argv, {
@@ -23,6 +24,7 @@ export async function runModels(argv: string[]): Promise<number> {
     mmproj: { type: 'boolean', default: false },
     'mmproj-file': { type: 'string' },
     embed: { type: 'boolean', default: false },
+    asr: { type: 'boolean', default: false },
   } as const)
   if (values.help) {
     console.log(HELP)
@@ -100,6 +102,15 @@ export async function runModels(argv: string[]): Promise<number> {
         if (!entry) throw new ObrewError('model_missing', `no installed model matches "${arg}"`)
         await saveConfig({ ...(await loadConfig()), embedModel: entry.id })
         console.log(`embedding model: ${entry.id}`)
+        return 0
+      }
+      if (values.asr) {
+        const registry = await loadRegistry()
+        const entry = findModel(registry, arg)
+        if (!entry) throw new ObrewError('model_missing', `no installed model matches "${arg}"`)
+        if (!entry.mmprojPath) throw new ObrewError('bad_request', `${entry.id} has no audio projector; pull it again with --mmproj`)
+        await saveConfig({ ...(await loadConfig()), asrModel: entry.id })
+        console.log(`transcription model: ${entry.id}`)
         return 0
       }
       const entry = await setDefault(arg)

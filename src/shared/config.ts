@@ -23,6 +23,12 @@ export const ConfigSchema = z.object({
   ctxSize: z.number().int().positive().optional(),
   /** Registry id of the embedding model (`obrew models use --embed <id>`). */
   embedModel: z.string().optional(),
+  /** Speech engine build. Set by `engine install --tts`; falls back to `variant`, then detection. */
+  ttsVariant: z.enum(VARIANTS).optional(),
+  /** The voice pack `obrew tts` and `serve` speak with (`obrew voices use <id>`). */
+  ttsPack: z.string().optional(),
+  /** Registry id of the transcription (ASR) model (`obrew models use --asr <id>`). */
+  asrModel: z.string().optional(),
 })
 export type Config = z.infer<typeof ConfigSchema>
 
