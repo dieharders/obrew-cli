@@ -3,10 +3,10 @@
  */
 import { join } from 'node:path'
 import { engineConsoleFrom, launchArgs, loadOptionsFrom } from '../../engine/flags'
-import { engineStatus, installEngine, requireEngine } from '../../engine/install'
+import { engineStatus, installEngine, installTtsEngine, requireEngine, ttsEngineStatus } from '../../engine/install'
 import { isAlive, listRunning, removeRunning } from '../../engine/running'
 import { acquireEngine, readShared, stopShared } from '../../engine/shared'
-import { LLAMACPP_TAG } from '../../engine/version'
+import { LLAMACPP_TAG, QWENTTS_TAG } from '../../engine/version'
 import { projectorPath, resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig, VARIANTS } from '../../shared/config'
 import { UsageError } from '../../shared/errors'
@@ -17,6 +17,7 @@ import { createOutput } from '../output'
 import { engineCommand } from './exec'
 
 const HELP = `obrew engine install [--variant cuda|cpu|vulkan|metal] [--tag bNNNN] [--json]
+obrew engine install --tts [--variant cuda|cpu|vulkan|metal] [--json]   the speech engine (qwentts.cpp tts-server)
 obrew engine status [--json]
 obrew engine start [--model <id>] [--vision] [-c key=value ...]   start (or reuse) the warm shared engine;
                              --vision loads the model's projector, as \`exec --vision\` does;
@@ -32,6 +33,7 @@ export async function runEngine(argv: string[]): Promise<number> {
     tag: { type: 'string' },
     model: { type: 'string' },
     vision: { type: 'boolean', default: false },
+    tts: { type: 'boolean', default: false },
     config: { type: 'string', multiple: true, short: 'c' },
   } as const)
   if (values.help) {
@@ -47,7 +49,8 @@ export async function runEngine(argv: string[]): Promise<number> {
       const onSignal = () => controller.abort()
       process.once('SIGINT', onSignal)
       try {
-        const record = await installEngine({
+        const install = values.tts ? installTtsEngine : installEngine
+        const record = await install({
           tag: values.tag,
           variant: values.variant ? oneOf(values.variant, VARIANTS, '--variant') : undefined,
           signal: controller.signal,
@@ -66,11 +69,13 @@ export async function runEngine(argv: string[]): Promise<number> {
       const running = (await listRunning()).filter((r) => isAlive(r.pid))
       const shared = await readShared()
       const sharedLive = shared && isAlive(shared.pid) ? shared : null
+      const tts = await ttsEngineStatus()
       if (values.json) {
-        console.log(JSON.stringify({ ...status, pinnedTag: LLAMACPP_TAG, running, shared: sharedLive }))
+        console.log(JSON.stringify({ ...status, pinnedTag: LLAMACPP_TAG, running, shared: sharedLive, tts: { ...tts, pinnedTag: QWENTTS_TAG } }))
         return 0
       }
       console.log(status.installed ? `installed: ${status.tag} (${status.variant})\n  ${status.binary}` : `not installed (pinned tag ${LLAMACPP_TAG})`)
+      console.log(tts.installed ? `speech: ${tts.tag} (${tts.variant})\n  ${tts.binary}` : `speech: not installed (pinned tag ${QWENTTS_TAG}; run \`obrew engine install --tts\`)`)
       if (sharedLive) {
         const idle = Math.round((Date.now() - sharedLive.lastUsed) / 1000)
         console.log(`shared: pid ${sharedLive.pid} port ${sharedLive.port} ${sharedLive.model} (idle ${idle} s)`)

@@ -17,6 +17,9 @@ import { runLogin } from './cli/commands/login'
 import { runModels } from './cli/commands/models'
 import { runServe } from './cli/commands/serve'
 import { runSessions } from './cli/commands/sessions'
+import { runTranscribe } from './cli/commands/transcribe'
+import { runTts } from './cli/commands/tts'
+import { runVoices } from './cli/commands/voices'
 
 const HELP = `obrew ${pkg.version} — local AI models as a headless agent CLI
 
@@ -25,8 +28,11 @@ Usage:
   obrew auth status [--json]
   obrew login [--model <repo[:file]>] [--json]
   obrew models list|pull|rm|use [...]
-  obrew engine install|status|start|stop [...]
+  obrew engine install|status|start|stop [--tts] [...]
   obrew serve [--host] [--port] [--model]
+  obrew tts [--voice <name>] [--out speech.wav | --pcm] "<text>"
+  obrew voices list|pull|use|rm [...]
+  obrew transcribe [--lang <language>] <file.wav>
   obrew embed [--model <id>] [--query <text>] [--image <path>] <text …>
   obrew sessions list|show|rm [...]
   obrew --version
@@ -66,6 +72,12 @@ export async function main(argv: string[]): Promise<number> {
         return await runServe(rest)
       case 'embed':
         return await runEmbed(rest)
+      case 'tts':
+        return await runTts(rest)
+      case 'voices':
+        return await runVoices(rest)
+      case 'transcribe':
+        return await runTranscribe(rest)
       default:
         throw new UsageError(`unknown command "${command}"\n\n${HELP}`)
     }

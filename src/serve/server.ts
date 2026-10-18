@@ -23,6 +23,12 @@ import { ObrewError } from '../shared/errors'
 import type { ExecEvent } from '../shared/events'
 import { frame, HEARTBEAT_MS, PING, SSE_HEADERS } from '../shared/sse'
 import { engineCommand } from '../cli/commands/exec'
+import { ttsEngineStatus } from '../engine/install'
+import { listVoices, PCM_HEADERS, speech, SpeechRequestSchema } from '../tts/client'
+import { TtsEngine } from '../tts/engine'
+import { installedPacks } from '../tts/packs'
+import { transcribeWav } from '../stt/client'
+import { AsrEngine, findAsrModel } from '../stt/engine'
 import pkg from '../../package.json' with { type: 'json' }
 
 export interface ServeOptions {
@@ -46,6 +52,8 @@ const error = (status: number, message: string, type = 'invalid_request_error') 
 export class ObrewServer {
   private engine: EngineHandle | null = null
   private embedder: EmbeddingEngine | null = null
+  private tts: TtsEngine | null = null
+  private asr: AsrEngine | null = null
   private loaded: ModelEntry | null = null
   private loading: Promise<EngineHandle> | null = null
   private server: ReturnType<typeof Bun.serve> | null = null
@@ -158,6 +166,110 @@ export class ObrewServer {
     }
   }
 
+  /**
+   * OpenAI `/v1/audio/speech`. `model` is a voice pack id (absent = the active pack); `pcm`
+   * streams s16le 24 kHz mono as it is generated, with the sample headers a player needs.
+   */
+  private async speech(req: Request): Promise<Response> {
+    const raw = await req.json().catch(() => null)
+    const parsed = SpeechRequestSchema.safeParse(raw)
+    if (!parsed.success) return error(400, parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '))
+    const body = parsed.data
+    try {
+      this.tts ??= new TtsEngine({ log: (m) => this.log(m) })
+      const { server } = await this.tts.ensure(body.model, req.signal)
+      const upstream = await speech(server.baseUrl, body, req.signal)
+      const headers: Record<string, string> = {
+        'content-type': upstream.headers.get('content-type') ?? (body.response_format === 'wav' ? 'audio/wav' : 'audio/pcm'),
+        'cache-control': 'no-cache',
+        ...(body.response_format === 'pcm' ? PCM_HEADERS : {}),
+      }
+      return new Response(upstream.body, { status: upstream.status, headers })
+    } catch (err) {
+      if (err instanceof ObrewError) return error(err.code === 'model_missing' || err.code === 'engine_missing' ? 503 : 502, err.message, err.code)
+      throw err
+    }
+  }
+
+  /** The voices the active (or named) pack answers to, plus the packs on disk. */
+  private async voices(req: Request): Promise<Response> {
+    const packs = await installedPacks()
+    const status = await ttsEngineStatus()
+    const wanted = new URL(req.url).searchParams.get('model') ?? undefined
+    if (!status.installed || packs.length === 0) {
+      return json({ voices: [], pack: null, packs: packs.map((p) => p.id), engine: status.installed ? 'ready' : 'missing' }, 503)
+    }
+    try {
+      this.tts ??= new TtsEngine({ log: (m) => this.log(m) })
+      const { server, pack } = await this.tts.ensure(wanted, req.signal)
+      const voices = await listVoices(server.baseUrl, req.signal)
+      return json({ voices, pack: pack.id, packs: packs.map((p) => p.id), engine: 'ready' })
+    } catch (err) {
+      if (err instanceof ObrewError) return error(503, err.message, err.code)
+      throw err
+    }
+  }
+
+  private async registerVoice(req: Request): Promise<Response> {
+    try {
+      this.tts ??= new TtsEngine({ log: (m) => this.log(m) })
+      const { server } = await this.tts.ensure(undefined, req.signal)
+      const upstream = await fetch(`${server.baseUrl}/v1/audio/voices`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: await req.text(),
+        signal: req.signal,
+      })
+      return new Response(upstream.body, { status: upstream.status, headers: { 'content-type': 'application/json' } })
+    } catch (err) {
+      if (err instanceof ObrewError) return error(503, err.message, err.code)
+      throw err
+    }
+  }
+
+  /**
+   * OpenAI `/v1/audio/transcriptions`: multipart `file` (wav/mp3/flac) with optional
+   * `language` and `response_format` (json | text | verbose_json), or JSON `{ audio: <base64 wav> }`.
+   */
+  private async transcriptions(req: Request): Promise<Response> {
+    let audio: Uint8Array | null = null
+    let language: string | undefined
+    let format = 'json'
+    const type = req.headers.get('content-type') ?? ''
+    try {
+      if (type.includes('multipart/form-data')) {
+        const form = await req.formData()
+        const file = form.get('file')
+        if (!(file instanceof Blob)) return error(400, 'file is required')
+        audio = new Uint8Array(await file.arrayBuffer())
+        language = typeof form.get('language') === 'string' ? String(form.get('language')) : undefined
+        format = typeof form.get('response_format') === 'string' ? String(form.get('response_format')) : 'json'
+      } else {
+        const body = (await req.json()) as { audio?: string; language?: string; response_format?: string }
+        if (typeof body.audio !== 'string') return error(400, 'audio (base64) is required')
+        audio = new Uint8Array(Buffer.from(body.audio, 'base64'))
+        language = body.language
+        format = body.response_format ?? 'json'
+      }
+    } catch {
+      return error(400, 'request body must be multipart/form-data with a file, or JSON with base64 audio')
+    }
+    if (audio.byteLength === 0) return error(400, 'empty audio')
+    if (audio.byteLength > 50 * 1024 * 1024) return error(413, 'audio over 50 MB')
+    try {
+      this.asr ??= new AsrEngine((m) => this.log(m))
+      const { server } = await this.asr.ensure(req.signal)
+      const started = Date.now()
+      const result = await transcribeWav(server.baseUrl, audio, { language, signal: req.signal })
+      if (format === 'text') return new Response(result.text, { headers: { 'content-type': 'text/plain; charset=utf-8' } })
+      if (format === 'verbose_json') return json({ text: result.text, language: result.language, duration_ms: Date.now() - started })
+      return json({ text: result.text })
+    } catch (err) {
+      if (err instanceof ObrewError) return error(err.code === 'model_missing' || err.code === 'engine_missing' ? 503 : 502, err.message, err.code)
+      throw err
+    }
+  }
+
   private async pull(req: Request): Promise<Response> {
     const body = (await req.json().catch(() => null)) as { spec?: string; mmproj?: boolean | string } | null
     if (!body?.spec) return error(400, 'spec (org/repo[:file]) is required')
@@ -226,6 +338,10 @@ export class ObrewServer {
       return this.proxy(path, req)
     }
     if (path === '/v1/embeddings' && req.method === 'POST') return this.embeddings(req)
+    if (path === '/v1/audio/speech' && req.method === 'POST') return this.speech(req)
+    if (path === '/v1/audio/voices' && req.method === 'GET') return this.voices(req)
+    if (path === '/v1/audio/voices' && req.method === 'POST') return this.registerVoice(req)
+    if (path === '/v1/audio/transcriptions' && req.method === 'POST') return this.transcriptions(req)
 
     // `default`, `chosen` and `defaultInstalled` mean the same thing on both routes: the model
     // a completion with no `model` would run, the one explicitly chosen if any, and whether
@@ -233,8 +349,12 @@ export class ObrewServer {
     if (path === '/obrew/status' && req.method === 'GET') {
       const status = await engineStatus()
       const model = await defaultModel(await loadRegistry())
+      const tts = await ttsEngineStatus()
+      const asrModel = await findAsrModel()
       return json({
         engine: status,
+        tts: { ...tts, running: this.tts?.running ?? null, packs: (await installedPacks()).map((p) => p.id) },
+        asr: { ready: asrModel !== null, model: asrModel?.id ?? null, running: this.asr?.running ?? null },
         loaded: this.loaded?.id ?? null,
         port: this.engine?.port ?? null,
         default: model.id,
@@ -296,5 +416,10 @@ export class ObrewServer {
     // The embedding engine is attached (ours); the chat engine is shared and stays warm.
     await this.embedder?.close()
     this.embedder = null
+    // The speech and transcription engines are attached (ours), like the embedder.
+    await this.tts?.stop()
+    this.tts = null
+    await this.asr?.stop()
+    this.asr = null
   }
 }

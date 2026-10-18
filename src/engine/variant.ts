@@ -84,3 +84,39 @@ export function assetNames(
       return null
   }
 }
+
+/**
+ * Release asset names for the speech engine (qwentts.cpp, built by obrew's fork CI), in the
+ * same shape as llama.cpp's so one installer serves both: `qwentts-<tag>-bin-<os>-<variant>-
+ * <arch>.<ext>`. The CUDA build on Windows carries its own runtime DLLs in the one archive.
+ */
+export function ttsAssetNames(tag: string, variant: Variant, platform: Platform, arch: Arch): string[] | null {
+  const bin = (suffix: string) => `qwentts-${tag}-bin-${suffix}`
+  if (platform === 'win32') {
+    if (arch !== 'x64') return null
+    switch (variant) {
+      case 'cuda':
+        return [bin('win-cuda-x64.zip')]
+      case 'cpu':
+        return [bin('win-cpu-x64.zip')]
+      case 'vulkan':
+        return [bin('win-vulkan-x64.zip')]
+      case 'metal':
+        return null
+    }
+  }
+  if (platform === 'darwin') {
+    if (variant === 'cuda' || variant === 'vulkan') return null
+    return [bin(arch === 'arm64' ? 'macos-arm64.tar.gz' : 'macos-x64.tar.gz')]
+  }
+  switch (variant) {
+    case 'cpu':
+      return [bin(`ubuntu-${arch}.tar.gz`)]
+    case 'vulkan':
+      return [bin(`ubuntu-vulkan-${arch}.tar.gz`)]
+    case 'cuda':
+      return [bin(`ubuntu-cuda-${arch}.tar.gz`)]
+    case 'metal':
+      return null
+  }
+}

@@ -115,6 +115,49 @@ swaps the engine when it differs.
   `serve` answers `/v1/embeddings`. Embeddings are in-memory only: nothing is stored between
   runs, by design.
 
+## Speech
+
+obrew speaks with [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) through a second engine,
+qwentts.cpp's `tts-server`, installed and managed the way llama-server is:
+
+```bash
+obrew engine install --tts                      # the speech engine (pinned fork release)
+obrew voices pull qwen3-tts-0.6b-customvoice    # a voice pack: talker + codec GGUF, ~1.3 GB
+obrew tts --voice ryan --out hello.wav "Hello there!"
+obrew tts --voice vivian --pcm "Streamed." | ffplay -f s16le -ar 24000 -ch_layout mono -
+```
+
+- `obrew voices list|pull|use|rm` manages packs. `customvoice` packs have nine named speakers
+  (ryan, vivian, serena, aiden, eric, dylan, uncle_fu, ono_anna, sohee); `base` packs clone a
+  voice from a reference clip; `voicedesign` (1.7B) builds one from a description.
+- `serve` answers OpenAI's `POST /v1/audio/speech` (`input`, `voice`, `language`,
+  `response_format: pcm|wav`; `model` names a pack). `pcm` streams signed 16-bit 24 kHz mono as
+  it is generated, with `X-Sample-Rate`, `X-Channels` and `X-Format` headers. `GET
+  /v1/audio/voices` lists the active pack's voices and the packs on disk; `POST
+  /v1/audio/voices` registers a cloned voice on a `base` pack. The engine starts on the first
+  request and stays warm while `serve` runs.
+- `obrew tts` uses a running `serve` when there is one and otherwise starts an engine of its own
+  for the one line (the 0.6B pack loads in a few seconds).
+- **A GPU is required for real time.** Measured on an i5-10600KF, the CPU build runs the 0.6B
+  pack at roughly 22× slower than real time (92 s for 4 s of audio); the CUDA build on an RTX 3070
+  runs it at RTF 0.18 with the first audio frame after about 50 ms. `engine install --tts` picks the CUDA build on an NVIDIA machine; `--variant cpu`
+  and `vulkan` exist for the rest.
+- `OBREW_TTS_SERVER=<path to tts-server>` runs a locally built binary instead of the installed
+  one, the way `OBREW_LLAMA_SERVER` does for chat.
+
+Speech to text runs on the chat engine itself, with an ASR model and its audio projector:
+
+```bash
+obrew models pull ggml-org/Qwen3-ASR-0.6B-GGUF --mmproj   # ~1.2 GB; becomes the transcription model
+obrew transcribe meeting.wav                               # or mp3 / flac
+```
+
+`serve` answers OpenAI's `POST /v1/audio/transcriptions` (multipart `file`, optional
+`language`, `response_format: json|text|verbose_json`, or JSON `{ "audio": <base64> }`) by
+running a second llama-server with the ASR model, started on the first request. `obrew models
+use --asr <id>` picks a different one; `/obrew/status` reports `asr.ready`. Measured on the
+RTX 3070: a 5 s clip transcribes in ~220 ms.
+
 ## Where things live
 
 `%LOCALAPPDATA%\Obrew` on Windows, `~/Library/Application Support/Obrew` on macOS,
