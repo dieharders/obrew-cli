@@ -23,3 +23,6 @@ export async function tempHome(): Promise<{ dir: string; cleanup: () => Promise<
 }
 
 export const FAKE_SERVER = join(import.meta.dir, 'fake-llama-server.ts')
+
+/** The fake stable-diffusion.cpp server; point `OBREW_SD_SERVER` at it. */
+export const FAKE_SD_SERVER = join(import.meta.dir, 'fake-sd-server.ts')

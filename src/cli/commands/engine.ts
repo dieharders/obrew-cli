@@ -4,6 +4,7 @@
 import { join } from 'node:path'
 import { engineConsoleFrom, launchArgs, loadOptionsFrom } from '../../engine/flags'
 import { engineStatus, installEngine, requireEngine } from '../../engine/install'
+import { stopAllImageEngines } from '../../image/engine/shared'
 import { isAlive, listRunning, removeRunning } from '../../engine/running'
 import { acquireEngine, readShared, stopShared } from '../../engine/shared'
 import { LLAMACPP_TAG } from '../../engine/version'
@@ -21,7 +22,8 @@ obrew engine status [--json]
 obrew engine start [--model <id>] [--vision] [-c key=value ...]   start (or reuse) the warm shared engine;
                              --vision loads the model's projector, as \`exec --vision\` does;
                              -c engine_console=true (Windows) shows its console window
-obrew engine stop            stop the shared engine and every llama-server obrew started
+obrew engine stop            stop the shared engine, every llama-server obrew started, and the
+                             image engine (\`obrew image engine stop\` stops only that)
 obrew engine log             print the llama-server log path and its tail`
 
 export async function runEngine(argv: string[]): Promise<number> {
@@ -117,6 +119,8 @@ export async function runEngine(argv: string[]): Promise<number> {
         }
         await removeRunning(r.pid)
       }
+      // A host's exit hook runs this to give the GPU back; the image engine holds it too.
+      stopped += await stopAllImageEngines()
       console.log(`stopped ${stopped} engine${stopped === 1 ? '' : 's'}`)
       return 0
     }

@@ -16,10 +16,14 @@ import { launchArgs, loadOptionsFrom } from '../engine/flags'
 import { engineStatus, requireEngine } from '../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../engine/shared'
 import { EmbeddingEngine } from '../embed/engine'
+import { reapIdleImageShared } from '../image/engine/shared'
+import { generateImages, memorySink, newRunId, type GenerateRequest, type ImageFormat } from '../image/generate'
+import { ASPECT_NAMES, parseSize, type Aspect } from '../image/size'
+import { imageStatus } from '../image/status'
 import { pullModel } from '../models/pull'
 import { defaultModel, loadRegistry, projectorPath, removeModel, resolveModel, setDefault, type ModelEntry } from '../models/registry'
 import { DEFAULT_CTX_SIZE, hfToken, loadConfig } from '../shared/config'
-import { ObrewError } from '../shared/errors'
+import { ObrewError, type FailCode } from '../shared/errors'
 import type { ExecEvent } from '../shared/events'
 import { frame, HEARTBEAT_MS, PING, SSE_HEADERS } from '../shared/sse'
 import { engineCommand } from '../cli/commands/exec'
@@ -40,6 +44,17 @@ export interface ServeOptions {
 }
 
 const json = (body: unknown, status = 200) => Response.json(body, { status })
+
+/** An image failure's HTTP status, by obrew's failure code. */
+const IMAGE_STATUS: Partial<Record<FailCode, number>> = {
+  bad_request: 400,
+  model_missing: 404,
+  engine_missing: 503,
+  engine_failed: 502,
+  out_of_memory: 507,
+  timeout: 504,
+  aborted: 499,
+}
 const error = (status: number, message: string, type = 'invalid_request_error') =>
   json({ error: { message, type, code: status } }, status)
 
@@ -158,6 +173,102 @@ export class ObrewServer {
     }
   }
 
+  /**
+   * OpenAI-shaped `POST /v1/images/generations`, run by obrew's image module: its bundles, size
+   * planning and per-job cancel, not a proxy of sd-server's own route. A disconnect cancels the
+   * job. `stream: true` answers with the `image.*` events over SSE instead (with heartbeats), for
+   * generations longer than a client will wait on a silent connection.
+   */
+  private async images(req: Request): Promise<Response> {
+    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) return error(400, 'prompt is required')
+    if (body.response_format !== undefined && body.response_format !== 'b64_json') return error(400, 'only response_format "b64_json" is supported')
+    const int = (v: unknown, name: string, min: number, max: number): number | undefined => {
+      if (v === undefined || v === null) return undefined
+      const n = Number(v)
+      if (!Number.isInteger(n) || n < min || n > max) throw new ObrewError('bad_request', `${name} must be an integer from ${min} to ${max}`)
+      return n
+    }
+    let request: GenerateRequest
+    let format: ImageFormat
+    try {
+      const requested = body.output_format ?? 'png'
+      if (requested !== 'png' && requested !== 'jpeg' && requested !== 'webp') throw new ObrewError('bad_request', 'output_format must be png, jpeg or webp')
+      format = requested
+      const aspect = body.aspect === undefined ? undefined : ASPECT_NAMES.find((a) => a === body.aspect)
+      if (body.aspect !== undefined && !aspect) throw new ObrewError('bad_request', `aspect must be one of ${ASPECT_NAMES.join(', ')}`)
+      request = {
+        prompt: body.prompt,
+        ...(typeof body.negative_prompt === 'string' && body.negative_prompt ? { negativePrompt: body.negative_prompt } : {}),
+        model: typeof body.model === 'string' ? body.model : undefined,
+        count: int(body.n, 'n', 1, 8) ?? 1,
+        size: typeof body.size === 'string' && body.size !== 'auto' ? parseSize(body.size) : undefined,
+        aspect: aspect as Aspect | undefined,
+        seed: int(body.seed, 'seed', 0, 2 ** 31 - 1),
+        steps: int(body.steps, 'steps', 1, 200),
+        format,
+        preview: body.stream === true && body.preview === true,
+      }
+    } catch (err) {
+      return error(400, err instanceof Error ? err.message : String(err))
+    }
+    // A generation can run for minutes; Bun's per-connection idle timeout would cut it.
+    this.server?.timeout(req, 0)
+    const ac = new AbortController()
+    req.signal.addEventListener('abort', () => ac.abort(), { once: true })
+    const runId = newRunId()
+    const base = { runId, signal: ac.signal, log: (m: string) => this.log(m), activity: () => {}, engineMode: 'shared' as const, pairs: {}, sink: memorySink() }
+
+    if (body.stream !== true) {
+      try {
+        const saved = await generateImages(request, { ...base, emit: () => {} })
+        return json({
+          created: Math.floor(Date.now() / 1000),
+          output_format: format,
+          data: saved.map((s) => ({ b64_json: s.b64, seed: s.seed, width: s.width, height: s.height, output_format: s.format })),
+        })
+      } catch (err) {
+        if (err instanceof ObrewError) return error(IMAGE_STATUS[err.code] ?? 500, err.message, err.code)
+        throw err
+      }
+    }
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (e: ExecEvent) => {
+          try {
+            controller.enqueue(frame(e))
+          } catch {
+            // Client gone.
+          }
+        }
+        const heartbeat = setInterval(() => {
+          try {
+            controller.enqueue(PING)
+          } catch {
+            // Closed.
+          }
+        }, HEARTBEAT_MS)
+        try {
+          await generateImages(request, { ...base, emit: send })
+        } catch (err) {
+          send({ type: 'image.failed', code: err instanceof ObrewError ? err.code : 'engine_failed', message: err instanceof Error ? err.message : String(err) })
+        } finally {
+          clearInterval(heartbeat)
+          try {
+            controller.close()
+          } catch {
+            // Already closed.
+          }
+        }
+      },
+      cancel() {
+        ac.abort()
+      },
+    })
+    return new Response(stream, { headers: SSE_HEADERS })
+  }
+
   private async pull(req: Request): Promise<Response> {
     const body = (await req.json().catch(() => null)) as { spec?: string; mmproj?: boolean | string } | null
     if (!body?.spec) return error(400, 'spec (org/repo[:file]) is required')
@@ -226,6 +337,7 @@ export class ObrewServer {
       return this.proxy(path, req)
     }
     if (path === '/v1/embeddings' && req.method === 'POST') return this.embeddings(req)
+    if (path === '/v1/images/generations' && req.method === 'POST') return this.images(req)
 
     // `default`, `chosen` and `defaultInstalled` mean the same thing on both routes: the model
     // a completion with no `model` would run, the one explicitly chosen if any, and whether
@@ -240,6 +352,7 @@ export class ObrewServer {
         default: model.id,
         chosen: model.chosen,
         defaultInstalled: model.installed,
+        image: await imageStatus(),
       })
     }
     if (path === '/obrew/models' && req.method === 'GET') {
@@ -284,7 +397,10 @@ export class ObrewServer {
       idleTimeout: 255,
       fetch: (req) => this.handle(req),
     })
-    this.reaper = setInterval(() => void reapIdleShared(this.opts.idleTtlMs).then((r) => r && this.log('stopped the idle engine')), 60_000)
+    this.reaper = setInterval(() => {
+      void reapIdleShared(this.opts.idleTtlMs).then((r) => r && this.log('stopped the idle engine'))
+      void reapIdleImageShared(this.opts.idleTtlMs).then((r) => r && this.log('stopped the idle image engine'))
+    }, 60_000)
     if (this.opts.model) await this.engineFor(this.opts.model)
     this.log(`obrew serve listening on http://${this.opts.host}:${this.port}`)
   }

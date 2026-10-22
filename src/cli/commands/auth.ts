@@ -6,6 +6,7 @@
  * Exit code is 0 either way; the answer is the status, not the exit.
  */
 import { engineStatus } from '../../engine/install'
+import { imageStatus, type ImageStatus } from '../../image/status'
 import { defaultModel, loadRegistry, projectorPath } from '../../models/registry'
 import { loadConfig } from '../../shared/config'
 import { UsageError } from '../../shared/errors'
@@ -25,6 +26,12 @@ export interface AuthStatus {
    * of `ready`.
    */
   model: { default: string; chosen: string | null; installed: boolean; vision: boolean; visionPublished: boolean | null }
+  /**
+   * Image generation, reported beside the text engine and never part of `ready`: a host that
+   * offers images gates them on `image.ready` (and `edit` / `upscale` for those features), and
+   * runs `setup` — or `obrew login --image` — when they are false. Read from files alone.
+   */
+  image: ImageStatus
   dataDir: string
 }
 
@@ -32,6 +39,7 @@ export async function authStatus(): Promise<AuthStatus> {
   const config = await loadConfig()
   const engine = await engineStatus(config)
   const model = await defaultModel(await loadRegistry())
+  const image = await imageStatus()
   return {
     ready: engine.installed && model.installed,
     engine: { installed: engine.installed, tag: engine.tag, variant: engine.variant },
@@ -42,6 +50,7 @@ export async function authStatus(): Promise<AuthStatus> {
       vision: !!model.entry && (await projectorPath(model.entry)) !== null,
       visionPublished: model.entry?.mmprojPublished ?? null,
     },
+    image,
     dataDir: dataDir(),
   }
 }
@@ -66,6 +75,10 @@ export async function runAuth(argv: string[]): Promise<number> {
     console.log(`engine: ${status.engine.installed ? `installed (${status.engine.tag}, ${status.engine.variant})` : 'missing'}`)
     console.log(`model:  ${status.model.default}${status.model.installed ? '' : ' (not installed)'}`)
     console.log(`vision: ${status.model.vision ? 'yes' : status.model.visionPublished === false ? 'no (text-only model)' : 'no'}`)
+    const img = status.image
+    console.log(
+      `images: ${img.ready ? `ready (${img.model.default}${img.edit ? `, edit ${img.model.edit}` : ''}${img.upscale ? ', upscale' : ''})` : `not set up — run \`${img.setup}\``}`,
+    )
     console.log(`data:   ${status.dataDir}`)
     if (!status.ready) console.log('run `obrew login` to install what is missing')
   }

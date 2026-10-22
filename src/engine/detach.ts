@@ -45,17 +45,41 @@ export interface DetachOptions {
   env?: Record<string, string | undefined>
   /** Windows: a visible console window instead of none. See the header. */
   console?: boolean
+  /**
+   * Append the process's stdout and stderr to this file. For an engine with no log-file flag of
+   * its own — sd-server has none, where llama-server has `--log-file` and needs none of this.
+   * POSIX redirects in the backgrounding shell. Windows wraps the engine in
+   * `cmd /d /s /c "… >> log 2>&1"`, which makes cmd.exe the process WMI created, so the pid
+   * returned is that of cmd's child, found by its parent pid and executable name: the pid the
+   * caller records, polls and kills is the engine's, and cmd exits with it.
+   */
+  stdioLog?: string
 }
 
+const exeName = (path: string) => path.slice(Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1)
+
 export async function spawnDetached(argv: string[], opts: DetachOptions): Promise<number> {
+  // Both shells' `>>` fail on a missing directory.
+  if (opts.stdioLog) await mkdir(dirname(opts.stdioLog), { recursive: true })
   if (process.platform === 'win32') {
-    const commandLine = argv.map(winQuote).join(' ')
+    const engineLine = argv.map(winQuote).join(' ')
+    const commandLine = opts.stdioLog
+      ? `cmd.exe /d /s /c "${engineLine} >> ${winQuote(opts.stdioLog)} 2>&1"`
+      : engineLine
     const createFlags = opts.console ? CREATE_NEW_CONSOLE : DETACHED_PROCESS
+    // With a wrapper, wait (bounded) for cmd.exe to start the engine and report the ENGINE's pid.
+    const child = opts.stdioLog
+      ? `$name = '${exeName(argv[0] ?? '').replace(/'/g, "''")}'; ` +
+        `for ($i = 0; $i -lt 100; $i++) { ` +
+        `$c = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($r.ProcessId)" | Where-Object { $_.Name -ieq $name } | Select-Object -First 1; ` +
+        `if ($c) { Write-Output $c.ProcessId; exit 0 }; Start-Sleep -Milliseconds 100 }; ` +
+        `Write-Error ("the engine did not start under cmd.exe pid " + $r.ProcessId); exit 1`
+      : `Write-Output $r.ProcessId`
     const script =
       `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ CreateFlags = [uint32]${createFlags} }; ` +
       `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ ` +
       `CommandLine = '${commandLine.replace(/'/g, "''")}'; CurrentDirectory = '${opts.cwd.replace(/'/g, "''")}'; ProcessStartupInformation = $si }; ` +
-      `if ($r.ReturnValue -ne 0) { Write-Error ("Win32_Process.Create failed: " + $r.ReturnValue); exit 1 }; Write-Output $r.ProcessId`
+      `if ($r.ReturnValue -ne 0) { Write-Error ("Win32_Process.Create failed: " + $r.ReturnValue); exit 1 }; ${child}`
     const proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       stdin: 'ignore',
       stdout: 'pipe',
@@ -72,7 +96,9 @@ export async function spawnDetached(argv: string[], opts: DetachOptions): Promis
   }
 
   const sh = Bun.which('sh') ?? '/bin/sh'
-  const proc = Bun.spawn([sh, '-c', 'nohup "$@" </dev/null >/dev/null 2>&1 & echo $!', 'obrew-detach', ...argv], {
+  // `$1` is the log (or /dev/null), shifted off so `"$@"` is exactly the engine's argv.
+  const script = 'log="$1"; shift; nohup "$@" </dev/null >>"$log" 2>&1 & echo $!'
+  const proc = Bun.spawn([sh, '-c', script, 'obrew-detach', opts.stdioLog ?? '/dev/null', ...argv], {
     cwd: opts.cwd,
     stdin: 'ignore',
     stdout: 'pipe',

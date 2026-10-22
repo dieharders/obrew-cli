@@ -10,6 +10,7 @@
 import { createWriteStream } from 'node:fs'
 import { mkdir, rename, rm, chmod, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { extractZip } from './unzip'
 
 export interface DownloadSpec {
   url: string
@@ -134,13 +135,6 @@ export async function downloadVerified(
 }
 
 /**
- * Unpack an archive into a directory using the system `tar`.
- *
- * bsdtar (Windows 10 build 17063+, macOS) reads .zip and .tar.gz alike with `-xf`; GNU tar
- * on Linux handles the .tar.gz that Linux assets ship as. The archive has already been
- * checksum-verified by the caller before this runs.
- */
-/**
  * On Windows prefer the bsdtar in System32 over whatever is first on PATH: a Git-for-Windows
  * shell puts GNU tar there, which reads `C:\...` as a remote host ("Cannot connect to C").
  */
@@ -148,14 +142,28 @@ export function tarBinary(): string | null {
   if (process.platform === 'win32') {
     const root = process.env.SystemRoot ?? 'C:\\Windows'
     const system = `${root}\\System32\\tar.exe`
-    if (Bun.spawnSync([system, '--version'], { stderr: 'ignore', stdout: 'ignore' }).exitCode === 0) return system
+    if (Bun.spawnSync([system, '--version'], { stderr: 'ignore', stdout: 'ignore' }).exitCode === 0)
+      return system
   }
   return Bun.which('tar')
 }
 
+/**
+ * Unpack an archive into a directory using the system `tar`, or obrew's own zip reader where
+ * that `tar` cannot read zip.
+ *
+ * bsdtar (Windows 10 build 17063+, macOS) reads .zip and .tar.gz alike with `-xf`. GNU tar,
+ * the `tar` on Linux, handles the .tar.gz that llama.cpp's Linux assets ship as but cannot
+ * read a .zip at all, and stable-diffusion.cpp's Linux assets are .zip. So a .zip on Linux,
+ * or on any host with no `tar`, goes to `extractZip` (unzip.ts) instead. The archive has
+ * already been checksum-verified by the caller before this runs.
+ */
 export async function extractArchive(archive: string, intoDir: string): Promise<void> {
   await mkdir(intoDir, { recursive: true })
+  const zip = /\.zip$/i.test(archive)
+  if (zip && process.platform === 'linux') return extractZip(archive, intoDir)
   const tar = tarBinary()
+  if (!tar && zip) return extractZip(archive, intoDir)
   if (!tar) throw new Error('`tar` was not found, so the archive cannot be unpacked.')
 
   const proc = Bun.spawn([tar, '-xf', archive, '-C', intoDir], {

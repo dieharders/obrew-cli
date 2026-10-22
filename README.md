@@ -25,10 +25,13 @@ obrew exec [resume <sessionId>] [--json] [--model <id>] [--effort low|medium|hig
            [--mcp-server name=<url> ...] [--tools Read,Grep,Glob|none]
            [--image <path> ...] [--vision] ("<prompt>" | --input-format json)
 obrew auth status [--json]
-obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--json]
+obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--image] [--json]
 obrew models list|pull <repo>[:file] [--mmproj]|rm <id>|use <id>
 obrew engine install [--variant cuda|cpu|vulkan|metal] | status | stop
 obrew sessions list|show <id>|rm <id>
+obrew image [--json] [--model <id>] [--aspect 16:9 | --size WxH] [--ref <img> | --image <img>]
+            [--upscale 2|4] [--count n] [--seed n] [--out <file|dir>] "<prompt>"
+obrew image setup | upscale <img> | models list|pull|rm|use | engine install|status|stop|log
 ```
 
 Every run-time knob is also a `-c key=value` pair (`thinking`, `max_tokens`, `temperature`,
@@ -114,6 +117,52 @@ swaps the engine when it differs.
   similarity, `obrew embed --image x.png` embeds an image with a vision embedding model, and
   `serve` answers `/v1/embeddings`. Embeddings are in-memory only: nothing is stored between
   runs, by design.
+
+## Images
+
+`obrew image` generates images locally: text to image, image to image, edits with reference
+images, and upscaling. It is its own module (`src/image/`) with its own engine — a pinned
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) `sd-server`
+(`sdcpp_tag` in package.json) kept warm between runs like the text engine — and its own state
+under `<data>/image/`. Why this engine and these models: [docs/image-generation.md](docs/image-generation.md).
+
+```bash
+obrew image setup                              # engine + default models + upscaler (several GB)
+obrew image "a lighthouse at dusk" --aspect 16:9
+obrew image "same lighthouse, winter night" --ref lighthouse.png     # edit with a reference
+obrew image "a watercolor of it" --image lighthouse.png --strength 0.5
+obrew image "a lighthouse" --size 1920x1080   # exact: generated at 1920×1088 and cropped
+obrew image upscale lighthouse.png --scale 2
+obrew image models list|pull|rm|use   obrew image engine install|status|stop|log
+```
+
+- **Models.** `setup` installs Z-Image-Turbo (default generator), FLUX.2 [klein] 4B (default
+  editor; also the default generator on CPU-only machines and base Apple chips, where it is the
+  fast one) and Real-ESRGAN x4plus. All Apache-2.0 / BSD-3-Clause and ungated on Hugging Face,
+  pinned by commit and SHA-256; the two generators share one Qwen3-4B text encoder file. Under
+  ~7.5 GiB of GPU memory, smaller quantisations are chosen. Any other model sd.cpp supports
+  installs from its parts: `models pull --name <id> --diffusion org/repo[@rev]:path --llm …`.
+- **Engine.** `cuda` on Windows NVIDIA (driver for CUDA 12.8+), `vulkan` for AMD / Intel and for
+  Linux NVIDIA, `metal` on macOS, `cpu` otherwise; `--variant rocm` on AMD. Memory flags
+  (`--offload-to-cpu`, `--max-vram`, `--vae-tiling`) are chosen from the detected VRAM;
+  `-c max_vram= / offload= / vae_tiling= / backend=` override them.
+- **Sizes.** `--aspect` picks a native size (16:9 = 1280×720). `--size WxH` is exact: made
+  directly when the model can, rounded up and cropped when that fits, else generated smaller,
+  upscaled ×4 and resampled. `--upscale 2|4` upscales the result.
+- **Hosts.** `--json` prints one event per line: `image.started`, `image.progress` (queue
+  position, step, decoding, upscaling), `image.preview` (with `--preview fast`), `image.saved`
+  (path, size, seed, model, duration), `image.completed`, or `image.failed` (exit 1; codes as
+  for `exec`, plus `out_of_memory`). `--input-format json` reads `{"prompt", "negativePrompt"?}`
+  from stdin. A kill cancels the job in the engine. `obrew auth status --json` reports an
+  `image` block (`ready`, `edit`, `upscale`) without changing `ready`; `obrew login --image` also
+  sets images up; `obrew engine stop` stops both engines. When the text and image engines do not
+  both fit in GPU memory, an idle one is stopped to make room — never a busy one.
+- **serve.** `POST /v1/images/generations` (`prompt`, `n`, `size`, `aspect`, `seed`, `steps`,
+  `output_format`, `negative_prompt`) answers OpenAI-style `data[].b64_json`; `"stream": true`
+  sends the `image.*` events over SSE instead.
+
+`bun run demo:image` starts a small web app ([examples/image-demo](examples/image-demo)) that
+drives the CLI the way a host app does. `bun run smoke:image [--bench]` is the real-hardware check.
 
 ## Where things live
 

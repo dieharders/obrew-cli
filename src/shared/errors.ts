@@ -15,6 +15,9 @@ export const FAIL_CODES = [
   'bad_request',
   'tool_error',
   'max_iterations',
+  // The image engine ran out of GPU (or unified) memory. Its own code rather than
+  // `engine_failed` because the fix differs: a smaller size or preset, or `-c max_vram=`.
+  'out_of_memory',
 ] as const
 export type FailCode = (typeof FAIL_CODES)[number]
 

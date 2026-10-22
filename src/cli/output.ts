@@ -68,6 +68,44 @@ export function createOutput(json: boolean): Output {
       case 'setup.done':
         err(`${event.ok ? 'ok' : 'failed'}: ${event.message}\n`)
         return
+      case 'download.plan': {
+        const fetch = event.files.filter((f) => !f.cached)
+        err(`${fetch.length} file${fetch.length === 1 ? '' : 's'} to download (${humanBytes(event.totalBytes)}), ${event.files.length - fetch.length} already here\n`)
+        return
+      }
+      case 'image.started': {
+        const what = event.mode === 'upscale' ? 'upscaling' : `${event.count} image${event.count === 1 ? '' : 's'}, ${event.width}×${event.height}`
+        err(`[image] ${what}${event.model ? ` with ${event.model}` : ''}${event.seed !== null ? ` (seed ${event.seed})` : ''}\n`)
+        return
+      }
+      case 'image.progress': {
+        // Throttled like downloads: a host wants every event, a terminal does not.
+        const now = Date.now()
+        if (now - lastProgressAt < 250 && event.step !== event.steps) return
+        lastProgressAt = now
+        const detail =
+          event.phase === 'sampling' && event.step !== undefined
+            ? `step ${event.step}/${event.steps}`
+            : event.phase === 'queued' && event.position
+              ? `queued (position ${event.position})`
+              : event.phase
+        err(`\r[image ${event.index + 1}] ${detail}   `)
+        return
+      }
+      case 'image.preview':
+        return
+      case 'image.saved':
+        // The one thing a script wants from human mode: the path, alone on stdout.
+        err('\n')
+        if (event.path) process.stdout.write(`${event.path}\n`)
+        err(`[image] ${event.width}×${event.height} in ${(event.durationMs / 1000).toFixed(1)} s${event.seed !== null ? `, seed ${event.seed}` : ''}\n`)
+        return
+      case 'image.completed':
+        err(`[done] ${event.images.length} image${event.images.length === 1 ? '' : 's'} in ${(event.durationMs / 1000).toFixed(1)} s\n`)
+        return
+      case 'image.failed':
+        err(`\nerror (${event.code}): ${event.message}\n`)
+        return
     }
   }
 

@@ -13,6 +13,7 @@ import { runAuth } from './cli/commands/auth'
 import { runEmbed } from './cli/commands/embed'
 import { runEngine } from './cli/commands/engine'
 import { runExec } from './cli/commands/exec'
+import { runImage } from './cli/commands/image'
 import { runLogin } from './cli/commands/login'
 import { runModels } from './cli/commands/models'
 import { runServe } from './cli/commands/serve'
@@ -28,6 +29,8 @@ Usage:
   obrew engine install|status|start|stop [...]
   obrew serve [--host] [--port] [--model]
   obrew embed [--model <id>] [--query <text>] [--image <path>] <text …>
+  obrew image [--json] [options] "<prompt>"       generate, edit (--ref) and upscale images
+  obrew image setup|upscale|models|engine [...]
   obrew sessions list|show|rm [...]
   obrew --version
 
@@ -66,6 +69,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runServe(rest)
       case 'embed':
         return await runEmbed(rest)
+      case 'image':
+        return await runImage(rest)
       default:
         throw new UsageError(`unknown command "${command}"\n\n${HELP}`)
     }

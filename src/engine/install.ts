@@ -13,6 +13,7 @@ import { loadConfig, saveConfig, type Config, type Variant } from '../shared/con
 import { downloadVerified, extractArchive, type Progress } from '../shared/download'
 import { ObrewError } from '../shared/errors'
 import { enginesDir, tmpDir } from '../shared/paths'
+import { assetSha256, fetchRelease } from '../shared/release'
 import { assetNames, detectVariant, hostArch, hostPlatform } from './variant'
 import { LLAMACPP_REPO, LLAMACPP_TAG } from './version'
 
@@ -24,17 +25,6 @@ export const EngineRecordSchema = z.object({
   installedAt: z.string(),
 })
 export type EngineRecord = z.infer<typeof EngineRecordSchema>
-
-const ReleaseSchema = z.object({
-  assets: z.array(
-    z.object({
-      name: z.string(),
-      browser_download_url: z.string(),
-      size: z.number(),
-      digest: z.string().nullable().optional(),
-    }),
-  ),
-})
 
 const engineDirFor = (tag: string, variant: string) => join(enginesDir(), `${tag}-${variant}`)
 const recordPath = (dir: string) => join(dir, 'engine.json')
@@ -81,14 +71,7 @@ export async function installEngine(opts: InstallOptions): Promise<EngineRecord>
   }
 
   log(`fetching release ${tag} of ${LLAMACPP_REPO}`)
-  // `OBREW_RELEASE_API` lets tests (and mirrors) stand in for api.github.com.
-  const api = (process.env.OBREW_RELEASE_API ?? 'https://api.github.com').replace(/\/$/, '')
-  const res = await fetch(`${api}/repos/${LLAMACPP_REPO}/releases/tags/${tag}`, {
-    signal: opts.signal,
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'obrew-cli' },
-  })
-  if (!res.ok) throw new ObrewError('engine_failed', `GitHub release lookup failed: HTTP ${res.status}`)
-  const release = ReleaseSchema.parse(await res.json())
+  const release = await fetchRelease(LLAMACPP_REPO, tag, opts.signal)
 
   const dir = engineDirFor(tag, variant)
   const staging = join(tmpDir(), `engine-${tag}-${variant}`)
@@ -113,7 +96,7 @@ export async function installEngine(opts: InstallOptions): Promise<EngineRecord>
       await downloadVerified(
         {
           url: asset.browser_download_url,
-          sha256: asset.digest?.replace(/^sha256:/, '') ?? null,
+          sha256: assetSha256(asset),
           size: asset.size,
           dest: archive,
         },

@@ -11,6 +11,7 @@
  * only when it asks for vision. This is what a host's "Sign in" button runs, in a real terminal
  * so the progress is visible.
  */
+import { imageSetup } from './image'
 import { pullModel } from '../../models/pull'
 import { defaultModelId, loadRegistry } from '../../models/registry'
 import { findEngine, installEngine } from '../../engine/install'
@@ -29,9 +30,12 @@ export async function runLogin(argv: string[]): Promise<number> {
     mmproj: { type: 'boolean', default: false },
     // Its own boolean: `parse` is strict, and parseArgs derives no `--no-` form by itself.
     'no-mmproj': { type: 'boolean', default: false },
+    image: { type: 'boolean', default: false },
   } as const)
   if (values.help) {
-    console.log('obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--variant cuda|cpu|vulkan|metal] [--json]')
+    console.log(`obrew login [--model <repo[:file]>] [--mmproj | --no-mmproj] [--variant cuda|cpu|vulkan|metal] [--image] [--json]
+  --image   also set up image generation (\`obrew image setup\`): the image engine, the default
+            generator and editor, and the upscaler — several GB, so never part of a bare login`)
     return 0
   }
   if (values.mmproj && values['no-mmproj']) throw new UsageError('--mmproj and --no-mmproj cannot be combined')
@@ -79,7 +83,9 @@ export async function runLogin(argv: string[]): Promise<number> {
     })
     log(`default model: ${entry.id}`)
 
-    out.event({ type: 'setup.done', ok: true, message: 'obrew is ready' })
+    if (values.image) await imageSetup({ out, signal: controller.signal })
+
+    out.event({ type: 'setup.done', ok: true, message: values.image ? 'obrew is ready, with image generation' : 'obrew is ready' })
     return 0
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
