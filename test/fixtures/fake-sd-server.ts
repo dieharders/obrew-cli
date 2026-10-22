@@ -17,7 +17,8 @@
  *   FAKE_BLANK=1            images come out flat white
  *   FAKE_LOG_ARGS=<p>       append this process's argv as one JSON line
  *   FAKE_LOG_REQUESTS=<p>   append every img_gen / upscale body (images elided) as JSON lines
- *   FAKE_LOG_CANCEL=<p>     append the id of every cancelled job
+ *   FAKE_LOG_CANCEL=<p>     append `<id> requested|cancelled <step>/<steps>` when a cancel arrives
+ *                           for a generating job, and when one takes effect
  *   FAKE_LINGER_MS=<n>      on SIGTERM close the listener but stay alive n ms
  */
 import { appendFileSync } from 'node:fs'
@@ -107,6 +108,16 @@ interface Job {
   error: { code: string; message: string } | null
   preview: { pass: number; step: number; total_steps: number; b64_json: string } | null
   body: { width?: number; height?: number; seed?: number; preview?: string; sample_params?: { sample_steps?: number } }
+  cancelRequested: boolean
+}
+
+/** As sd-server does: a queued job is cancelled on the spot, a generating one at its next step. */
+function cancelled(job: Job, step: number, steps: number) {
+  job.status = 'cancelled'
+  job.completed = Date.now()
+  job.error = { code: 'cancelled', message: 'job cancelled by client' }
+  job.preview = null
+  if (env.FAKE_LOG_CANCEL) appendFileSync(env.FAKE_LOG_CANCEL, `${job.id} cancelled ${step}/${steps}\n`)
 }
 
 const jobs = new Map<string, Job>()
@@ -132,7 +143,10 @@ async function work(): Promise<void> {
   const steps = job.body.sample_params?.sample_steps ?? 4
   for (let step = 1; step <= steps; step++) {
     await Bun.sleep(stepMs)
-    if (job.status !== 'generating') break
+    if (job.cancelRequested) {
+      cancelled(job, step, steps)
+      break
+    }
     if (job.body.preview && job.body.preview !== 'none') {
       job.preview = { pass: 1, step, total_steps: steps, b64_json: b64(encodePng(picture(16, 9, step))) }
     }
@@ -186,7 +200,7 @@ const server = Bun.serve({
       logRequest('img_gen', body)
       if (!body.width || !body.height) return Response.json({ error: 'width and height are required' }, { status: 400 })
       const id = `job_fake_${++seq}`
-      const job: Job = { id, status: 'queued', created: Date.now(), started: null, completed: null, result: null, error: null, preview: null, body }
+      const job: Job = { id, status: 'queued', created: Date.now(), started: null, completed: null, result: null, error: null, preview: null, body, cancelRequested: false }
       jobs.set(id, job)
       queue.push(job)
       void work()
@@ -197,20 +211,21 @@ const server = Bun.serve({
       const job = jobs.get(decodeURIComponent(jobMatch[1]!))
       if (!job) return Response.json({ error: 'not found' }, { status: 404 })
       if (jobMatch[2] && req.method === 'POST') {
-        if (job.status === 'completed' || job.status === 'failed') return Response.json({ error: 'finished' }, { status: 409 })
-        job.status = 'cancelled'
-        job.completed = Date.now()
-        job.error = { code: 'cancelled', message: 'job cancelled by client' }
-        const at = queue.indexOf(job)
-        if (at >= 0) queue.splice(at, 1)
-        if (env.FAKE_LOG_CANCEL) appendFileSync(env.FAKE_LOG_CANCEL, job.id + '\n')
-        return Response.json({ id: job.id, status: 'cancelled' })
+        if (job.status === 'queued') {
+          queue.splice(queue.indexOf(job), 1)
+          cancelled(job, 0, job.body.sample_params?.sample_steps ?? 4)
+        } else if (job.status === 'generating') {
+          job.cancelRequested = true
+          if (env.FAKE_LOG_CANCEL) appendFileSync(env.FAKE_LOG_CANCEL, `${job.id} requested ${job.preview?.step ?? 0}/${job.body.sample_params?.sample_steps ?? 4}\n`)
+        }
+        return Response.json({ id: job.id, status: job.status, cancel_requested: job.cancelRequested })
       }
       const position = job.status === 'queued' ? queue.indexOf(job) + 1 : 0
       return Response.json({
         id: job.id,
         kind: 'img_gen',
         status: job.status,
+        cancel_requested: job.cancelRequested,
         created: job.created,
         started: job.started,
         completed: job.completed,

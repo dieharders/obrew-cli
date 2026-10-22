@@ -10,7 +10,8 @@
  * releases, and Metal / Vulkan / ROCm regress independently). It sets up what is missing (several
  * GB the first time), then: a small image, image-to-image, a reference edit, a ×2 upscale — each
  * checked for the right size and for not being one flat colour (a known Metal failure mode) —
- * and stops the engine. One line per step; exit 1 on the first failure. Images go to a temp dir.
+ * Ctrl-C mid-generation (the engine must stop the job, not finish it behind the next one), and
+ * stops the engine. One line per step; exit 1 on the first failure. Images go to a temp dir.
  */
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -39,6 +40,31 @@ async function obrew(cmd: string[]): Promise<{ code: number; events: Array<Recor
       }
     })
   return { code, events, stderr, ms: Date.now() - t0 }
+}
+
+/** Run a command, calling `onEvent` with each stdout event as it arrives and ms since start. */
+async function obrewLive(cmd: string[], onEvent: (e: Record<string, unknown>, ms: number, proc: Bun.Subprocess) => void): Promise<{ code: number; events: Array<Record<string, unknown>>; stderr: string }> {
+  const t0 = Date.now()
+  const proc = Bun.spawn([...argv0, ...cmd], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env } })
+  const stderr = new Response(proc.stderr).text()
+  const events: Array<Record<string, unknown>> = []
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for await (const chunk of proc.stdout) {
+    buffer += decoder.decode(chunk, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines.filter(Boolean)) {
+      try {
+        const e = JSON.parse(line) as Record<string, unknown>
+        events.push(e)
+        onEvent(e, Date.now() - t0, proc)
+      } catch {
+        // not an event
+      }
+    }
+  }
+  return { code: await proc.exited, events, stderr: await stderr }
 }
 
 function step(name: string, ok: boolean, detail = ''): void {
@@ -70,6 +96,34 @@ await image('reference edit', ['the same bicycle in the snow', '--ref', first, '
 const up = await obrew(['image', 'upscale', first, '--scale', '2', '--json', '--out', out, ...pairs])
 const upSaved = up.events.find((e) => e.type === 'image.saved')
 step('upscale ×2', up.code === 0 && upSaved?.width === 1024 && upSaved?.height === 1024, up.code === 0 ? `in ${(up.ms / 1000).toFixed(1)} s` : failure(up))
+
+// Ctrl-C at step 2 of 20 (a host's kill is the same signal path on macOS / Linux). An engine that
+// cannot interrupt a running job finishes all 20 steps, and the next image queues behind them.
+{
+  const stepAt: number[] = []
+  const stopped = await obrewLive(['image', 'a lighthouse on a cliff, photo', '--size', '512x512', '--steps', '20', '--seed', '3', '--json', '--out', out, ...pairs], (e, ms, proc) => {
+    if (e.type === 'image.progress' && typeof e.step === 'number' && e.step >= 1 && stepAt[e.step] === undefined) {
+      stepAt[e.step] = ms
+      if (e.step === 2) proc.kill('SIGINT')
+    }
+  })
+  const last = stopped.events.at(-1)
+  if (stopped.code !== 1 || last?.type !== 'image.failed' || last.code !== 'aborted') step('cancel (Ctrl-C)', false, `exit ${stopped.code}, last event ${JSON.stringify(last)}`)
+  const stepMs = stepAt[2]! - stepAt[1]!
+  let queuedAt: number | null = null
+  let queuedMs = 0
+  const next = await obrewLive(['image', 'a red bicycle leaning on a brick wall, photo', '--size', '512x512', '--steps', '4', '--seed', '1', '--json', '--out', out, ...pairs], (e, ms) => {
+    if (e.type !== 'image.progress') return
+    if (e.phase === 'queued') queuedAt ??= ms
+    else if (queuedAt !== null && queuedMs === 0) queuedMs = ms - queuedAt
+  })
+  if (next.code !== 0) step('cancel (Ctrl-C)', false, `the next image failed: ${failure({ ...next, ms: 0 })}`)
+  step(
+    'cancel (Ctrl-C)',
+    queuedMs < 2 * stepMs + 3000,
+    `stopped at step 2 of 20; the next image waited ${(queuedMs / 1000).toFixed(1)} s (one step takes ${(stepMs / 1000).toFixed(1)} s)`,
+  )
+}
 
 if (bench) {
   const list = JSON.parse((await new Response(Bun.spawn([...argv0, 'image', 'models', 'list', '--json'], { stdout: 'pipe', env: { ...process.env } }).stdout).text())) as {

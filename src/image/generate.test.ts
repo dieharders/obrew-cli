@@ -160,7 +160,7 @@ describe('generateImages', () => {
     expect(result).toHaveLength(1)
   })
 
-  test('an abort cancels our job in the engine', async () => {
+  test('an abort cancels our job in the engine while it is generating', async () => {
     const cancelLog = join(out, 'cancel.log')
     process.env.FAKE_LOG_CANCEL = cancelLog
     process.env.FAKE_STEP_MS = '200'
@@ -170,7 +170,10 @@ describe('generateImages', () => {
       if (e.type === 'image.progress' && e.step === 1) ac.abort()
     } }))
     await expect(run).rejects.toBeDefined()
-    expect((await readFile(cancelLog, 'utf8')).trim()).toMatch(/^job_fake_\d+$/)
+    // The ephemeral engine goes with the run, so only the request is seen here; the engine
+    // stopping the job is engine/jobs.test.ts and the host contract test.
+    const [, step, steps] = (await readFile(cancelLog, 'utf8')).trim().match(/^job_fake_\d+ requested (\d+)\/(\d+)$/) ?? []
+    expect(Number(step)).toBeLessThan(Number(steps))
   })
 
   test('the memory sink returns base64 and no path', async () => {

@@ -91,6 +91,51 @@ describe('obrew image (host contract)', () => {
     expect(badStdin.stdout).toBe('')
   })
 
+  // Ctrl-C in a terminal, and a host's kill on macOS / Linux. A Windows kill is TerminateProcess
+  // (no handler runs; engine/jobs.test.ts covers the reaper that cleans up after it), and the
+  // detached fake there would not inherit FAKE_*.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    test.skipIf(process.platform === 'win32')(`${signal} mid-sampling: aborted, exit 1, and the warm engine stops the job`, async () => {
+      await seedImageModels()
+      const cancelLog = join(out, 'cancel.log')
+      const slow = { ...env(), FAKE_STEP_MS: '100', FAKE_LOG_CANCEL: cancelLog }
+      const proc = Bun.spawn([process.execPath, MAIN, 'image', '--json', '--steps', '30', '--size', '64x64', '--out', out, 'a cat'], {
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'ignore',
+        env: { ...process.env, ...slow },
+      })
+      let stdout = ''
+      let signalled = false
+      const decoder = new TextDecoder()
+      const reader = proc.stdout.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        stdout += decoder.decode(value)
+        if (!signalled && /"step":[1-9]/.test(stdout)) {
+          signalled = true
+          proc.kill(signal)
+        }
+      }
+      expect(signalled).toBe(true)
+      expect(await proc.exited).toBe(1)
+      expect(events(stdout).at(-1)).toMatchObject({ type: 'image.failed', code: 'aborted' })
+
+      // The engine outlives the CLI and must stop the job itself, well before step 30.
+      let lines: string[] = []
+      for (let i = 0; i < 50 && !lines.some((l) => l.includes(' cancelled ')); i++) {
+        await Bun.sleep(50)
+        lines = (await Bun.file(cancelLog).text().catch(() => '')).trim().split('\n')
+      }
+      const [, step, steps] = lines.find((l) => l.includes(' cancelled '))?.match(/ cancelled (\d+)\/(\d+)$/) ?? []
+      expect(Number(step)).toBeLessThan(Number(steps))
+
+      const next = await obrew(['image', '--json', '--size', '64x64', '--out', out, 'a dog'], { env: env() })
+      expect(next.code).toBe(0)
+    })
+  }
+
   test('models list --json, upscale, and engine stop', async () => {
     await seedImageModels()
     const list = JSON.parse((await obrew(['image', 'models', 'list', '--json'], { env: env() })).stdout)

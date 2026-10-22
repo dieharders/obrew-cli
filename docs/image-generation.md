@@ -233,9 +233,12 @@ and the `leejet/*-GGUF` repos are ungated, so no Hugging Face token is needed.
 
 ### stable-diffusion.cpp in detail
 
-**Releases.** Tags look like `master-<build>-<hash>` (latest `master-987-a77d362`, 2026-10-21),
-about one per merged commit (28–68 a month); the README warns that options change often. Pin a
-tested tag, as obrew pins `llamacpp_tag`. Every zip ships both `sd-cli` and `sd-server`.
+**Releases.** Tags look like `master-<build>-<hash>` (`master-987-a77d362`, 2026-10-21, when
+this was researched), about one per merged commit (28–68 a month); the README warns that options
+change often. Pin a tested tag, as obrew pins `llamacpp_tag`. Every zip ships both `sd-cli` and
+`sd-server`. obrew now pins `master-994-e779d4f` (2026-10-22), the first release that can cancel
+a job that is already generating ([#2190](https://github.com/leejet/stable-diffusion.cpp/pull/2190));
+the asset names below are unchanged apart from the hash.
 
 | Target         | Asset (`master-987-a77d362`)                                                                  | Zip size        |
 | -------------- | --------------------------------------------------------------------------------------------- | --------------- |
@@ -260,7 +263,9 @@ loaded and exposes:
   `GET /v1/models`.
 - A1111: `/sdapi/v1/txt2img`, `/sdapi/v1/progress` (with a latent preview).
 - Native async jobs: `POST /sdcpp/v1/img_gen`; `GET /sdcpp/v1/jobs/{id}` (status, queue position,
-  step / total_steps, preview PNG); `POST /sdcpp/v1/jobs/{id}/cancel`; `POST /sdcpp/v1/upscale`;
+  step / total_steps, preview PNG); `POST /sdcpp/v1/jobs/{id}/cancel` (a queued job at once; a
+  generating one answers `cancel_requested: true` and stops at its next step — before
+  `master-994` it answered 409 and finished the image); `POST /sdcpp/v1/upscale`;
   `GET /sdcpp/v1/capabilities`; a full queue answers 429.
 - Model management: `/sdcpp/v1/models/load|unload|status|refresh`, `/sdcpp/v1/recipes`. Loading is
   refused while jobs are pending; hardware and memory options are startup flags.

@@ -151,7 +151,9 @@ export class SdClient implements ImageBackend {
   }
 
   async cancel(id: string): Promise<void> {
-    // Best effort: a job that already finished answers 409/410, which is fine.
+    // Best effort, and returns at once: a queued job is dropped, a generating one answers
+    // `cancel_requested: true` and stops at its next checkpoint (sd.cpp master-994 and later;
+    // older builds refuse with 409 and finish the image). A finished job is left as it is.
     await fetch(`${this.baseUrl}/sdcpp/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', signal: AbortSignal.timeout(5000) }).catch(() => {})
   }
 

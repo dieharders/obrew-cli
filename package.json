@@ -10,7 +10,7 @@
     "obrew": "./src/main.ts"
   },
   "llamacpp_tag": "b10937",
-  "sdcpp_tag": "master-987-a77d362",
+  "sdcpp_tag": "master-994-e779d4f",
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
