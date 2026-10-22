@@ -184,6 +184,7 @@ function startJob(title) {
 function endJob() {
   state.busy = false
   state.controller = null
+  if (state.failed) $('#job-title').textContent = 'Failed'
   $('#cancel').disabled = true
   $('#setup-go').disabled = false
   $('#go').disabled = !state.status?.image?.ready
@@ -302,7 +303,14 @@ function generate(overrides = {}) {
     body.strength = Number($('#strength').value)
   }
   Object.assign(body, overrides)
-  void run('/api/generate', body, { title: 'Generating…', thumbnail: !!uc.title, prompt: text, body })
+  void run('/api/generate', forEdit(body), { title: 'Generating…', thumbnail: !!uc.title, prompt: text, body })
+}
+
+/** A reference edit needs a model that can edit; otherwise let the CLI pick the default editor. */
+function forEdit(body) {
+  if (!body.refs?.length) return body
+  const caps = state.models?.presets?.find((p) => p.id === body.model)?.caps ?? state.models?.bundles?.find((b) => b.id === body.model)?.caps
+  return caps && !caps.edit ? { ...body, model: 'default' } : body
 }
 
 // ------------------------------------------------------------------------------------------
@@ -397,7 +405,7 @@ function addCard(e, job) {
   // The same request again, with this image as its reference and a fresh seed.
   button('Vary', () =>
     job.body
-      ? run('/api/generate', { ...job.body, refs: [e.name], image: undefined, strength: undefined, seed: undefined, count: 1 }, { ...job, title: 'Varying…' })
+      ? run('/api/generate', forEdit({ ...job.body, refs: [e.name], image: undefined, strength: undefined, seed: undefined, count: 1 }), { ...job, title: 'Varying…' })
       : generate({ refs: [e.name], image: undefined, seed: undefined }),
   )
   const download = document.createElement('a')
