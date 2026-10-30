@@ -5,7 +5,7 @@
  * Face (no token), and pinned: repository, commit, path, SHA-256 and size per file, so a repo
  * that re-uploads a file under the same name cannot change what a preset installs. Data, not
  * code: re-pinning is `bun run scripts/image-presets.ts`, which prints these entries from the Hub.
- * See docs/image-generation.md for why these three.
+ * See docs/image-generation.md for why these. `optional` presets are not part of `setup`.
  *
  * A diffusion model needs more than its weights. Z-Image and FLUX.2 klein both condition on the
  * Qwen3-4B language model (the ORIGINAL Qwen3-4B: Z-Image's own text-encoder shards are byte for
@@ -17,7 +17,8 @@
  */
 import { GIB } from './engine/hardware'
 
-export const ROLES = ['diffusion', 'model', 'llm', 'vae', 't5xxl', 'clip_l', 'clip_g', 'upscaler'] as const
+/** `tokenizer` is a `tokenizer.json` for the `llm`, when its vocabulary differs from the one sd.cpp embeds (Qwen3.5). */
+export const ROLES = ['diffusion', 'model', 'llm', 'vae', 't5xxl', 'clip_l', 'clip_g', 'tokenizer', 'upscaler'] as const
 export type Role = (typeof ROLES)[number]
 
 export interface PinnedFile {
@@ -72,6 +73,8 @@ export interface Preset {
   maxPixels: number
   /** What it is good at, for a host's picker. */
   uses: string[]
+  /** Not part of `image setup`: installed on request with `image models pull <id>` or `setup --model <id>`. */
+  optional?: boolean
 }
 
 const QWEN3_4B: PinnedFile = {
@@ -171,6 +174,85 @@ export const PRESETS: Preset[] = [
     align: 16,
     maxPixels: 2_200_000,
     uses: ['edit', 'character', 'draft', 'abstract'],
+  },
+  {
+    // Optional: 9.4 GB, 50 steps at CFG 3, so it is slow on Apple Silicon and the CPU. Pulled on
+    // request. sd.cpp runs it since master-982 (#2148); the tokenizer must be passed separately
+    // because Qwen3.5's vocabulary differs from the Qwen tokenizer sd.cpp embeds. Unsloth's
+    // mixed-precision `UD` quants: LPIPS 0.21 vs bf16 for UD-Q4_K_XL against 0.29 for Q4_K_M.
+    id: 'moss-image-sft',
+    title: 'MOSS-Image SFT',
+    description: 'OpenMOSS, 5B DiT on a Qwen3.5-9B encoder. Renders text and follows layouts (tags, JSON bounding boxes); English and Chinese. 50 steps, CFG 3: slow, 9.4 GB.',
+    kind: 'generator',
+    license: 'Apache-2.0',
+    homepage: 'https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT',
+    components: [
+      {
+        role: 'diffusion',
+        file: {
+          repo: 'unsloth/MOSS-Image-SFT-GGUF',
+          revision: 'a013f7442e672e67b21f485b4b4f369df5500847',
+          path: 'MOSS-Image-SFT-UD-Q4_K_XL.gguf',
+          sha256: 'efe318d6ba48e9012fc650f642f9956e6ea382ee4098a6d7e903455ba2d58f0f',
+          size: 3_419_844_768,
+        },
+        small: {
+          repo: 'unsloth/MOSS-Image-SFT-GGUF',
+          revision: 'a013f7442e672e67b21f485b4b4f369df5500847',
+          path: 'MOSS-Image-SFT-UD-Q3_K_XL.gguf',
+          sha256: 'd232a9b20bc650286035cc81eac42b0332c418c2026d9dc8c8f1f742a96b1583',
+          size: 2_839_752_864,
+        },
+      },
+      {
+        // The text encoder is Qwen3.5-9B, not the Qwen3-4B the other two share.
+        role: 'llm',
+        file: {
+          repo: 'unsloth/Qwen3.5-9B-GGUF',
+          revision: '3885219b6810b007914f3a7950a8d1b469d598a5',
+          path: 'Qwen3.5-9B-Q4_K_M.gguf',
+          sha256: '03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8',
+          size: 5_680_522_464,
+        },
+        small: {
+          repo: 'unsloth/Qwen3.5-9B-GGUF',
+          revision: '3885219b6810b007914f3a7950a8d1b469d598a5',
+          path: 'Qwen3.5-9B-Q3_K_M.gguf',
+          sha256: '8fed90306e4f019e2bf35f3766470b7bc59ea1a9dae00f5ceb20b43cb5514393',
+          size: 4_673_643_744,
+        },
+      },
+      {
+        // The FLUX.2 VAE with the small decoder, as MOSS ships it, in sd.cpp's layout (the file
+        // sd.cpp's MOSS page points at). Apache-2.0.
+        role: 'vae',
+        file: {
+          repo: 'Comfy-Org/MOSS-Image',
+          revision: '530a4c94f92c35ef6818b1b035a983fe9dcf5f54',
+          path: 'vae/flux2-vae_small.safetensors',
+          sha256: 'd8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b',
+          size: 249_521_340,
+        },
+      },
+      {
+        role: 'tokenizer',
+        file: {
+          repo: 'OpenMOSS-Team/MOSS-Image-SFT',
+          revision: 'f972bd4b4b9e3852133cc5da954d87bc32cd8fb9',
+          path: 'tokenizer/tokenizer.json',
+          sha256: '06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523',
+          size: 19_989_325,
+        },
+      },
+    ],
+    // Upstream's settings: 50 steps, CFG 3, flow shift 5 (sd.cpp's default for this model).
+    defaults: { steps: 50, cfg: 3, sampler: 'euler' },
+    caps: { generate: true, img2img: true, edit: false, upscale: false, maxRefs: 0 },
+    align: 16,
+    // Trained around 1 MP; larger sizes go through the upscaler.
+    maxPixels: 1_100_000,
+    uses: ['text', 'poster', 'layout', 'thumbnail'],
+    optional: true,
   },
   {
     id: 'realesrgan-x4plus',

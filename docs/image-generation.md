@@ -396,6 +396,19 @@ Installed by `obrew image setup` (pinned by repository, commit, path and SHA-256
 | `z-image-turbo`     | `leejet/Z-Image-Turbo-GGUF` Q5_0 (4.54 GB); Q4_K (3.86 GB) below a 7.5 GiB memory budget     | `unsloth/Qwen3-4B-GGUF` Q4_K_M (2.5 GB), shared | `Comfy-Org/z_image_turbo` → `split_files/vae/ae.safetensors` (Apache-2.0; byte-identical to FLUX.1's gated `ae`) | 8 / 1.0     | Default generator on GPUs: photoreal, architecture, characters                        |
 | `flux2-klein-4b`    | `leejet/FLUX.2-klein-4B-GGUF` Q8_0 (4.30 GB); Q4_0 (2.46 GB) below 7.5 GiB                   | the same Qwen3-4B file                          | `black-forest-labs/FLUX.2-small-decoder` → `full_encoder_small_decoder.safetensors` (Apache-2.0)                 | 4 / 1.0     | Default editor (`--ref`); default generator on CPU-only machines and base Apple chips |
 | `realesrgan-x4plus` | `Comfy-Org/Real-ESRGAN_repackaged` → `RealESRGAN_x4plus.safetensors` (66.9 MB, BSD-3-Clause) | —                                               | —                                                                                                                | ×4          | Upscaling                                                                             |
+| `moss-image-sft` (optional) | `unsloth/MOSS-Image-SFT-GGUF` UD-Q4_K_XL (3.42 GB); UD-Q3_K_XL (2.84 GB) below 7.5 GiB | `unsloth/Qwen3.5-9B-GGUF` Q4_K_M (5.68 GB); Q3_K_M (4.67 GB) below 7.5 GiB, plus `OpenMOSS-Team/MOSS-Image-SFT` → `tokenizer/tokenizer.json` (`--tokenizer`) | `Comfy-Org/MOSS-Image` → `vae/flux2-vae_small.safetensors` (Apache-2.0) | 50 / 3.0 | Text inside images and layout control (tags, JSON bounding boxes). Not part of `setup`: `models pull moss-image-sft` |
+
+**MOSS-Image SFT** (OpenMOSS, Oct 2026, Apache-2.0) is the "watch" entry of §4.1 made available on
+request. sd.cpp runs it since master-982 ([#2148](https://github.com/leejet/stable-diffusion.cpp/pull/2148),
+in the pinned master-994): a 5B DiT on a **Qwen3.5-9B** encoder, whose vocabulary differs from the
+Qwen tokenizer sd.cpp embeds, so `tokenizer.json` is a fourth component passed with `--tokenizer`
+(a new `tokenizer` role). Its VAE is the FLUX.2 small-decoder VAE as MOSS ships it. Why optional:
+9.4 GB, and upstream's 50 steps at CFG 3 are two DiT passes per step, so it is an order of
+magnitude slower than the turbo models; `--steps 20` is the practical setting while trying it.
+Unsloth's `UD` quants are used over leejet's uniform ones: Unsloth measured UD-Q4_K_XL at LPIPS
+0.21 against bf16 where Q4_K_M scores 0.29. Reference-image input landed later upstream
+([#2203](https://github.com/leejet/stable-diffusion.cpp/pull/2203), a "variation" mode) and the
+edit LoRA is an open request (#2238), so the preset is generate and img2img only.
 
 One text-encoder file serves both generators, and it is the ORIGINAL Qwen3-4B: Z-Image-Turbo's
 own text-encoder shards are byte-identical to `Qwen/Qwen3-4B`, and Comfy-Org ships the same

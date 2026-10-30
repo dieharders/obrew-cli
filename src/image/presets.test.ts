@@ -79,6 +79,20 @@ describe('PRESETS', () => {
     expect(llm(DEFAULT_GENERATOR)).toEqual(llm(DEFAULT_EDITOR))
   })
 
+  test('MOSS-Image is optional, brings its own Qwen3.5 encoder and a tokenizer for it', () => {
+    const moss = findPreset('moss-image-sft')!
+    expect(moss.optional).toBe(true)
+    expect(moss.components.map((c) => c.role)).toEqual(['diffusion', 'llm', 'vae', 'tokenizer'])
+    const llm = (id: string) => findPreset(id)!.components.find((c) => c.role === 'llm')!.file
+    expect(llm('moss-image-sft').repo).toBe('unsloth/Qwen3.5-9B-GGUF')
+    expect(llm('moss-image-sft')).not.toEqual(llm(DEFAULT_GENERATOR))
+    expect(moss.components.find((c) => c.role === 'tokenizer')!.file.path).toMatch(/tokenizer\.json$/)
+    // Upstream's settings: two passes per step (CFG 3), and the small tier shrinks both big files.
+    expect(moss.defaults).toMatchObject({ steps: 50, cfg: 3 })
+    expect(presetBytes(moss, 'small')).toBeLessThan(presetBytes(moss, 'default'))
+    expect(PRESETS.filter((p) => !p.optional).map((p) => p.id)).toEqual([DEFAULT_GENERATOR, DEFAULT_EDITOR, DEFAULT_UPSCALER])
+  })
+
   test('one hash is always the same pinned file', () => {
     const byHash = new Map<string, PinnedFile>()
     for (const f of pinnedFiles()) {

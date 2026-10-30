@@ -1,5 +1,5 @@
 /**
- * Image models for tests: the three presets' bundles, registered under their real ids and
+ * Image models for tests: the presets `setup` installs, registered under their real ids and
  * capabilities but backed by tiny files, so every code path runs without gigabytes of weights.
  * The fake sd-server (./fake-sd-server.ts) never reads them; it only needs the paths on its
  * command line.
@@ -12,8 +12,8 @@ import { saveImageRegistry, type Bundle, type ImageRegistry } from '../../src/im
 
 const sha = (b: Uint8Array) => new Bun.CryptoHasher('sha256').update(b).digest('hex')
 
-/** Register `ids` (default: all three presets) as installed, with tiny files on disk. */
-export async function seedImageModels(ids: string[] = PRESETS.map((p) => p.id), defaults: Partial<Pick<ImageRegistry, 'default' | 'defaultEdit' | 'upscaler'>> = {}): Promise<ImageRegistry> {
+/** Register `ids` (default: what `setup` installs, i.e. the non-optional presets) as installed, with tiny files on disk. */
+export async function seedImageModels(ids: string[] = PRESETS.filter((p) => !p.optional).map((p) => p.id), defaults: Partial<Pick<ImageRegistry, 'default' | 'defaultEdit' | 'upscaler'>> = {}): Promise<ImageRegistry> {
   const registry: ImageRegistry = { version: 1, default: null, defaultEdit: null, upscaler: null, files: {}, bundles: [], ...defaults }
   for (const id of ids) {
     const preset = PRESETS.find((p) => p.id === id)

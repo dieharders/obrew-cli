@@ -36,6 +36,7 @@ interface GenerateBody {
   size?: unknown
   seed?: unknown
   count?: unknown
+  steps?: unknown
   image?: unknown
   strength?: unknown
   refs?: unknown
@@ -118,6 +119,9 @@ export function startDemo(opts: DemoOptions = {}) {
     if (seed !== undefined) args.push('--seed', String(Math.trunc(seed)))
     const count = num(body.count)
     if (count !== undefined) args.push('--count', String(Math.trunc(count)))
+    // Empty means the model's own default (MOSS-Image's is 50; fewer is the practical test setting).
+    const steps = num(body.steps)
+    if (steps !== undefined && steps >= 1) args.push('--steps', String(Math.trunc(steps)))
     const upscale = num(body.upscale)
     if (upscale === 2 || upscale === 4) args.push('--upscale', String(upscale))
     const image = str(body.image)

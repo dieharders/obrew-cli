@@ -140,8 +140,12 @@ describe('obrew image (host contract)', () => {
     await seedImageModels()
     const list = JSON.parse((await obrew(['image', 'models', 'list', '--json'], { env: env() })).stdout)
     expect(list.default).toBe('z-image-turbo')
-    expect(list.presets.map((p: { id: string }) => p.id)).toEqual(['z-image-turbo', 'flux2-klein-4b', 'realesrgan-x4plus'])
-    expect(list.presets.every((p: { installed: boolean }) => p.installed)).toBe(true)
+    expect(list.presets.map((p: { id: string }) => p.id)).toEqual(['z-image-turbo', 'flux2-klein-4b', 'moss-image-sft', 'realesrgan-x4plus'])
+    // Setup's three are installed; the optional MOSS-Image preset is offered, not installed.
+    for (const p of list.presets as Array<{ id: string; installed: boolean; optional: boolean }>) {
+      expect(p.optional).toBe(p.id === 'moss-image-sft')
+      expect(p.installed).toBe(!p.optional)
+    }
     expect(list.aspects['16:9']).toEqual([1280, 720])
 
     const src = join(out, 'small.png')

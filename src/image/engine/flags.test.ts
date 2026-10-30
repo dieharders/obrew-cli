@@ -130,6 +130,17 @@ describe('serverPlan', () => {
     expect(valueOf(args, '--sampling-method')).toBe('euler')
   })
 
+  test('a tokenizer component (MOSS-Image) becomes --tokenizer', () => {
+    const moss = resolved({
+      bundle: { ...TURBO, id: 'moss-image-sft', components: [...TURBO.components, { role: 'tokenizer', sha256: 'd'.repeat(64) }], defaults: { steps: 50, cfg: 3, sampler: 'euler' } },
+      paths: { ...resolved().paths, tokenizer: '/m/tokenizer.json' },
+      hashes: { ...resolved().hashes, tokenizer: 'd'.repeat(64) },
+    })
+    const { args } = plan({ resolved: moss })
+    expect(valueOf(args, '--tokenizer')).toBe('/m/tokenizer.json')
+    expect(valueOf(args, '--cfg-scale')).toBe('3')
+  })
+
   test('no bundle (an upscale-only engine): no model flags, and a small footprint', () => {
     const p = plan({ resolved: null })
     for (const flag of ['--diffusion-model', '--llm', '--vae', '--steps', '--cfg-scale'])

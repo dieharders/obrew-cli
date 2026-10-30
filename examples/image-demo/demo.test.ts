@@ -59,7 +59,7 @@ describe('image demo server', () => {
     expect((await fetch(base)).headers.get('content-type')).toContain('text/html')
     expect((await fetch(`${base}/app.js`)).status).toBe(200)
     const useCases = (await (await fetch(`${base}/api/use-cases`)).json()) as Array<{ id: string }>
-    expect(useCases.map((u) => u.id)).toEqual(['thumbnail', 'character', 'photoreal', 'architecture', 'abstract'])
+    expect(useCases.map((u) => u.id)).toEqual(['thumbnail', 'character', 'photoreal', 'architecture', 'abstract', 'poster'])
     const status = (await (await fetch(`${base}/api/status`)).json()) as { image: { ready: boolean } }
     expect(status.image.ready).toBe(true)
     const models = (await (await fetch(`${base}/api/models`)).json()) as { default: string }

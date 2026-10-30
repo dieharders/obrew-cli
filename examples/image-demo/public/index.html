@@ -372,7 +372,7 @@
             <select id="model"></select>
           </div>
         </div>
-        <div class="row">
+        <div class="row" style="grid-template-columns: 1fr 1fr 1fr">
           <div>
             <label for="seed">Seed</label>
             <input id="seed" inputmode="numeric" placeholder="random" />
@@ -385,6 +385,10 @@
               <option>3</option>
               <option>4</option>
             </select>
+          </div>
+          <div>
+            <label for="steps">Steps</label>
+            <input id="steps" inputmode="numeric" placeholder="model default" />
           </div>
         </div>
         <label class="check"><input type="checkbox" id="fullhd" /> Exactly 1920×1080 (16:9)</label>

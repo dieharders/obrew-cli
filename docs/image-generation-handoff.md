@@ -186,7 +186,10 @@ Also fixed:
 7. **Phase 2:**
    - inpainting (`--mask`);
    - LoRA, plus an SDXL-class CPU / low-end tier (DreamShaper XL v2 Turbo, or RealVisXL + SDXL-Lightning) and Animagine XL 4.0 for anime;
-   - an `ernie-image-turbo` preset for text inside images;
+   - an `ernie-image-turbo` preset for text inside images (2026-10-28: `moss-image-sft` was added
+     as an optional preset for this, with a new `tokenizer` component role; the demo has a
+     "Poster / text" use case and a Steps field. Verify it on real hardware, then decide whether
+     ERNIE is still wanted);
    - hires-fix;
    - `serve` `/v1/images/edits`;
    - model hot-swap through `/sdcpp/v1/models/load`;

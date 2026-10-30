@@ -6,7 +6,7 @@
 export interface UseCase {
   id: string
   label: string
-  model: 'default' | 'z-image-turbo' | 'flux2-klein-4b'
+  model: 'default' | 'z-image-turbo' | 'flux2-klein-4b' | 'moss-image-sft'
   aspect: '16:9' | '1:1' | '9:16' | '4:3' | '3:4' | '21:9'
   /** Appended to the user's prompt. */
   suffix: string
@@ -64,5 +64,14 @@ export const USE_CASES: UseCase[] = [
     suffix: 'abstract art, bold geometric shapes, vivid complementary colours, rich texture',
     hint: 'Vary a result to explore: same reference, new seed.',
     example: 'the feeling of a summer thunderstorm',
+  },
+  {
+    id: 'poster',
+    label: 'Poster / text',
+    model: 'moss-image-sft',
+    aspect: '3:4',
+    suffix: 'poster design, legible typography, balanced layout, high contrast',
+    hint: 'MOSS-Image renders the words you quote. Install it first: obrew image models pull moss-image-sft (9.4 GB; 50 steps, so slow on Apple Silicon — try --steps 20).',
+    example: 'a vintage travel poster for the moon with the title "LUNA EXPRESS" and the tagline "departs nightly"',
   },
 ]

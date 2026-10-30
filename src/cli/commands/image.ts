@@ -443,6 +443,7 @@ export async function listImageModels() {
         caps: p.caps,
         defaults: p.defaults,
         downloadBytes: presetBytes(p, tier),
+        optional: p.optional ?? false,
         installed: bundle ? await isComplete(registry, bundle) : false,
       }
     }),
@@ -473,7 +474,7 @@ export async function listImageModels() {
   }
 }
 
-const ROLE_FLAGS = ['diffusion', 'llm', 'vae', 't5xxl', 'clip_l', 'clip_g'] as const
+const ROLE_FLAGS = ['diffusion', 'llm', 'vae', 't5xxl', 'clip_l', 'clip_g', 'tokenizer'] as const
 
 async function runModels(argv: string[]): Promise<number> {
   const { values, positionals } = parse(argv, {
@@ -490,6 +491,7 @@ async function runModels(argv: string[]): Promise<number> {
     t5xxl: { type: 'string' },
     clip_l: { type: 'string' },
     clip_g: { type: 'string' },
+    tokenizer: { type: 'string' },
     steps: { type: 'string' },
     cfg: { type: 'string' },
     'can-edit': { type: 'boolean', default: false },
@@ -497,7 +499,7 @@ async function runModels(argv: string[]): Promise<number> {
   const help = `obrew image models list [--json]
 obrew image models pull <preset> [--tier default|small] [--json]
 obrew image models pull --name <id> --diffusion org/repo[@rev]:path [--llm …] [--vae …] [--t5xxl …]
-                        [--clip_l …] [--clip_g …] [--steps n] [--cfg x] [--can-edit] [--json]
+                        [--clip_l …] [--clip_g …] [--tokenizer …] [--steps n] [--cfg x] [--can-edit] [--json]
 obrew image models pull --name <id> --model org/repo[@rev]:file.safetensors   (one-file checkpoint)
 obrew image models rm <id>
 obrew image models use <id> [--edit | --upscaler]`
@@ -515,7 +517,7 @@ obrew image models use <id> [--edit | --upscaler]`
       }
       console.log(`default: ${list.default}   edit: ${list.defaultEdit}   upscaler: ${list.upscaler}`)
       for (const p of list.presets) {
-        console.log(`${p.installed ? '*' : ' '} ${p.id.padEnd(20)} ${p.kind.padEnd(9)} ${p.license.padEnd(12)} ${humanBytes(p.downloadBytes).padStart(9)}  ${p.title}`)
+        console.log(`${p.installed ? '*' : ' '} ${p.id.padEnd(20)} ${p.kind.padEnd(9)} ${p.license.padEnd(12)} ${humanBytes(p.downloadBytes).padStart(9)}  ${p.title}${p.optional && !p.installed ? '  (optional: models pull)' : ''}`)
       }
       for (const b of list.bundles.filter((b) => !b.preset)) console.log(`${b.complete ? '*' : '!'} ${b.id.padEnd(20)} ${b.kind.padEnd(9)} custom       ${humanBytes(b.bytes).padStart(9)}`)
       console.log('* installed')

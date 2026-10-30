@@ -69,7 +69,8 @@ async function refresh() {
   setStatus(img.ready, img.ready ? `ready · ${img.engine.variant} · ${img.model.default}` : 'image generation not set up')
   $('#setup').classList.toggle('hidden', img.ready)
   $('#go').disabled = !img.ready || state.busy
-  const total = (state.models.presets ?? []).filter((p) => !p.installed).reduce((n, p) => n + p.downloadBytes, 0)
+  // Optional presets (MOSS-Image) are not part of setup; they are pulled on request.
+  const total = (state.models.presets ?? []).filter((p) => !p.installed && !p.optional).reduce((n, p) => n + p.downloadBytes, 0)
   if (total) $('#setup-hint').textContent = `Installs the engine and the default models from Hugging Face (up to ${bytes(total)}; downloads resume if interrupted).`
 
   const select = $('#model')
@@ -284,6 +285,12 @@ function seedValue() {
   return s === '' ? undefined : Number(s)
 }
 
+/** Empty: the model's own default step count. */
+function stepsValue() {
+  const s = $('#steps').value.trim()
+  return s === '' ? undefined : Number(s)
+}
+
 function generate(overrides = {}) {
   if (state.busy || !state.useCase) return
   const uc = state.useCase
@@ -295,6 +302,7 @@ function generate(overrides = {}) {
     aspect: $('#aspect').value,
     seed: seedValue(),
     count: Number($('#count').value),
+    steps: stepsValue(),
   }
   if ($('#fullhd').checked && body.aspect === '16:9') body.size = '1920x1080'
   if (state.input?.mode === 'ref') body.refs = [state.input.name]

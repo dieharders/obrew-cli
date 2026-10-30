@@ -37,6 +37,7 @@ const ROLE_FLAGS: Record<Role, string> = {
   t5xxl: '--t5xxl',
   clip_l: '--clip_l',
   clip_g: '--clip_g',
+  tokenizer: '--tokenizer',
   upscaler: '--upscale-model',
 }
 
