@@ -15,12 +15,15 @@
  *   Vulkan / ROCm, or ≤ 8 GiB  --vae-tiling: Mesa RADV caps one allocation at 4 GiB, and a
  *                              1 MP decode is the largest single buffer of a run
  *   Metal                      --batched-cfg off: batched CFG renders white images on Metal
- *                              (stable-diffusion.cpp #2149); our presets run at CFG 1 anyway
+ *                              (stable-diffusion.cpp #2149). Free at CFG 1 (the turbo presets);
+ *                              above it (MOSS-Image, CFG 3) the two passes of a step run one
+ *                              after the other, so a step takes about twice as long
  *   cpu variant                --backend cpu
  *
  * `-c max_vram= / offload= / vae_tiling= / backend= / threads=` override each decision. A flag
  * the installed build does not list in its `--help` is dropped with a warning instead of making
- * sd-server refuse to start.
+ * sd-server refuse to start, except a model file's flag: without `--tokenizer` a model would run
+ * on the wrong vocabulary and produce garbage with no error, so a missing one is `engine_failed`.
  */
 import { ObrewError } from '../../shared/errors'
 import { modelRootDir, upscalersDir } from '../paths'
@@ -117,6 +120,14 @@ export function serverPlan(input: ServerPlanInput): ServerPlan {
   const supported = ([flag]: [string, string?]) => engine.flags.length === 0 || known.has(flag)
   const kept = flags.filter(supported)
   const dropped = flags.filter((f) => !supported(f)).map(([flag]) => flag)
+  const modelFlags = new Set(Object.values(ROLE_FLAGS))
+  const missing = dropped.filter((flag) => modelFlags.has(flag))
+  if (missing.length) {
+    throw new ObrewError(
+      'engine_failed',
+      `this sd-server build has no ${missing.join(', ')}, which ${resolved?.bundle.id ?? 'this model'} needs; update it with \`obrew image engine install\``,
+    )
+  }
   const args = kept.flatMap(([flag, value]) => (value === undefined ? [flag] : [flag, value]))
 
   const env: Record<string, string | undefined> = { ...engineEnv(engine.binDir) }

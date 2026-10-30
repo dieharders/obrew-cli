@@ -141,7 +141,7 @@ obrew image models list|pull|rm|use   obrew image engine install|status|stop|log
   fast one) and Real-ESRGAN x4plus. All Apache-2.0 / BSD-3-Clause and ungated on Hugging Face,
   pinned by commit and SHA-256; the two generators share one Qwen3-4B text encoder file. Under
   ~7.5 GiB of GPU memory, smaller quantisations are chosen. `models pull moss-image-sft` adds
-  MOSS-Image SFT (OpenMOSS, Apache-2.0; text inside images and layout control; 9.4 GB, 50 steps,
+  MOSS-Image SFT (OpenMOSS, Apache-2.0; text inside images and layout control; 9.4 GB, or 7.8 GB below 12 GiB of GPU memory; 50 steps,
   so slow on Apple Silicon and the CPU). Any other model sd.cpp supports installs from its parts:
   `models pull --name <id> --diffusion org/repo[@rev]:path --llm … [--tokenizer …]`.
 - **Engine.** `cuda` on Windows NVIDIA (driver for CUDA 12.8+), `vulkan` for AMD / Intel and for

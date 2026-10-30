@@ -71,7 +71,7 @@ export const USE_CASES: UseCase[] = [
     model: 'moss-image-sft',
     aspect: '3:4',
     suffix: 'poster design, legible typography, balanced layout, high contrast',
-    hint: 'MOSS-Image renders the words you quote. Install it first: obrew image models pull moss-image-sft (9.4 GB; 50 steps, so slow on Apple Silicon — try --steps 20).',
+    hint: 'MOSS-Image renders the words you quote. Install it first: obrew image models pull moss-image-sft (7.8–9.4 GB). It runs 50 steps, so it is slow on Apple Silicon: set Steps to 20 to try it.',
     example: 'a vintage travel poster for the moon with the title "LUNA EXPRESS" and the tagline "departs nightly"',
   },
 ]

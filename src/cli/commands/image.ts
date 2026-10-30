@@ -374,7 +374,7 @@ export async function imageSetup(o: {
     throw new ObrewError('bad_request', `"${o.model}" is not a curated image generator; see \`obrew image models list\``)
   }
   const cpuOnly = engine.variant === 'cpu'
-  const tier = o.tier ?? tierFor(memoryBudgetBytes(hw))
+  const budget = memoryBudgetBytes(hw)
   const generator = o.model ?? (cpuOnly || isBaseAppleChip(hw) ? DEFAULT_EDITOR : DEFAULT_GENERATOR)
   const wanted: Array<{ id: string; slots: Slot[] }> = []
   if (!cpuOnly || generator === DEFAULT_GENERATOR) wanted.push({ id: DEFAULT_GENERATOR, slots: generator === DEFAULT_GENERATOR ? ['generator'] : [] })
@@ -383,7 +383,7 @@ export async function imageSetup(o: {
   if (!o.noUpscaler) wanted.push({ id: DEFAULT_UPSCALER, slots: ['upscaler'] })
   const token = hfToken(await loadConfig())
   const cb = pullCallbacks(o.out, o.signal, token)
-  for (const w of wanted) await pullPreset(w.id, tier, { ...cb, makeDefault: w.slots })
+  for (const w of wanted) await pullPreset(w.id, o.tier ?? tierFor(budget, findPreset(w.id)), { ...cb, makeDefault: w.slots })
   log(`default image model: ${generator}${generator === DEFAULT_EDITOR && !cpuOnly ? ` (the fastest here; \`--model ${DEFAULT_GENERATOR}\` for the highest quality)` : ''}`)
 }
 
@@ -428,7 +428,7 @@ async function runSetup(argv: string[]): Promise<number> {
 export async function listImageModels() {
   const registry = await loadImageRegistry()
   const hw = await detectHardware()
-  const tier = tierFor(memoryBudgetBytes(hw))
+  const budget = memoryBudgetBytes(hw)
   const presets = await Promise.all(
     PRESETS.map(async (p) => {
       const bundle = registry.bundles.find((b) => b.preset === p.id)
@@ -442,7 +442,8 @@ export async function listImageModels() {
         uses: p.uses,
         caps: p.caps,
         defaults: p.defaults,
-        downloadBytes: presetBytes(p, tier),
+        tier: tierFor(budget, p),
+        downloadBytes: presetBytes(p, tierFor(budget, p)),
         optional: p.optional ?? false,
         installed: bundle ? await isComplete(registry, bundle) : false,
       }
@@ -467,7 +468,8 @@ export async function listImageModels() {
     defaultEdit: slotId(registry, 'edit'),
     upscaler: slotId(registry, 'upscaler'),
     chosen: { default: registry.default, defaultEdit: registry.defaultEdit, upscaler: registry.upscaler },
-    tier,
+    // The tier of the setup presets; each preset reports its own (MOSS-Image goes small sooner).
+    tier: tierFor(budget),
     aspects: ASPECTS,
     presets,
     bundles,
@@ -552,7 +554,7 @@ obrew image models use <id> [--edit | --upscaler]`
         } else {
           if (!target) throw new UsageError(help)
           const hw = await detectHardware()
-          const tier = values.tier ? oneOf(values.tier, TIERS, '--tier') : tierFor(memoryBudgetBytes(hw))
+          const tier = values.tier ? oneOf(values.tier, TIERS, '--tier') : tierFor(memoryBudgetBytes(hw), findPreset(target))
           id = (await pullPreset(target, tier, cb)).id
         }
         out.event({ type: 'setup.done', ok: true, message: id })

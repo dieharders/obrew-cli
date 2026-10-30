@@ -16,7 +16,7 @@ What to try:
   `obrew image setup --json` and shows the download plan and progress.
 - **Use cases.** Thumbnail, Character, Photoreal, Architecture, Abstract and Poster / text pick a
   model, an aspect ratio and prompt scaffolding (`presets.ts`). Poster / text wants MOSS-Image,
-  which `setup` does not install: `obrew image models pull moss-image-sft` (9.4 GB) first. Its
+  which `setup` does not install: `obrew image models pull moss-image-sft` (9.4 GB, or 7.8 GB on smaller GPUs) first. Its
   default is 50 steps; the **Steps** field overrides any model's default (`--steps`).
 - **Thumbnails.** The model paints the art with room on the left; the title is drawn by the page
   in real type over it, live as you type, and exported as a PNG — exact and editable, which no

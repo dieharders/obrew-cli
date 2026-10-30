@@ -43,7 +43,9 @@ export const BundleSchema = z.object({
   kind: z.enum(['generator', 'upscaler']),
   title: z.string(),
   license: z.string().nullable(),
-  components: z.array(z.object({ role: z.enum(ROLES), sha256: z.string() })),
+  // A string, not z.enum(ROLES): a role added later (as `tokenizer` was) must make only the bundle
+  // that uses it unusable to this build, not the whole registry unreadable. See resolveBundle.
+  components: z.array(z.object({ role: z.string(), sha256: z.string() })),
   defaults: z.object({ steps: z.number(), cfg: z.number(), sampler: z.string().optional() }),
   caps: CapsSchema,
   align: z.number(),
@@ -126,8 +128,8 @@ export function pathsOf(registry: ImageRegistry, bundle: Bundle): ResolvedBundle
   for (const c of bundle.components) {
     const entry = registry.files[c.sha256]
     if (!entry) continue
-    paths[c.role] = entry.path
-    hashes[c.role] = c.sha256
+    paths[c.role as Role] = entry.path
+    hashes[c.role as Role] = c.sha256
     bytes += entry.size
   }
   return { bundle, paths, hashes, bytes }
@@ -148,6 +150,8 @@ export async function resolveBundle(query: string | null | undefined, slot: Slot
       wantsDefault ? `the default image model ${id} is not installed; run \`obrew image setup\`` : `no installed image model matches "${id}"; see \`obrew image models list\``,
     )
   }
+  const unknown = bundle.components.filter((c) => !(ROLES as readonly string[]).includes(c.role)).map((c) => c.role)
+  if (unknown.length) throw new ObrewError('bad_request', `image model ${bundle.id} needs a newer obrew (it has a ${unknown.join(', ')} file this version cannot pass to the engine)`)
   if (!(await isComplete(registry, bundle))) {
     const fix = bundle.preset ? `\`obrew image models pull ${bundle.preset}\`` : `pull it again from its parts (\`obrew image models pull --name ${bundle.id} --diffusion …\`)`
     throw new ObrewError('model_missing', `image model ${bundle.id} is missing files; ${fix}`)

@@ -113,6 +113,13 @@ describe('tierFor', () => {
     expect(tierFor(24 * GIB)).toBe('default')
     expect(tierFor(null)).toBe('default')
   })
+
+  test('a preset can go small sooner: MOSS-Image below 12 GiB', () => {
+    const moss = findPreset('moss-image-sft')!
+    expect(tierFor(10 * GIB, moss)).toBe('small')
+    expect(tierFor(12 * GIB, moss)).toBe('default')
+    expect(tierFor(10 * GIB, findPreset(DEFAULT_GENERATOR))).toBe('default')
+  })
 })
 
 describe('presetFiles and presetBytes', () => {

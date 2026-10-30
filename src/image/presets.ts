@@ -75,6 +75,8 @@ export interface Preset {
   uses: string[]
   /** Not part of `image setup`: installed on request with `image models pull <id>` or `setup --model <id>`. */
   optional?: boolean
+  /** Below this memory budget its `small` files are used; SMALL_TIER_BELOW when absent. */
+  smallTierBelow?: number
 }
 
 const QWEN3_4B: PinnedFile = {
@@ -182,7 +184,7 @@ export const PRESETS: Preset[] = [
     // mixed-precision `UD` quants: LPIPS 0.21 vs bf16 for UD-Q4_K_XL against 0.29 for Q4_K_M.
     id: 'moss-image-sft',
     title: 'MOSS-Image SFT',
-    description: 'OpenMOSS, 5B DiT on a Qwen3.5-9B encoder. Renders text and follows layouts (tags, JSON bounding boxes); English and Chinese. 50 steps, CFG 3: slow, 9.4 GB.',
+    description: 'OpenMOSS, 5B DiT on a Qwen3.5-9B encoder. Renders text and follows layouts (tags, JSON bounding boxes); English and Chinese. 50 steps, CFG 3: slow; 9.4 GB (7.8 GB small tier).',
     kind: 'generator',
     license: 'Apache-2.0',
     homepage: 'https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT',
@@ -253,6 +255,9 @@ export const PRESETS: Preset[] = [
     maxPixels: 1_100_000,
     uses: ['text', 'poster', 'layout', 'thumbnail'],
     optional: true,
+    // The default files plan for ~11.1 GiB (9.4 GB × 1.1 + 1.5 GiB), so below 12 GiB the small
+    // ones (~9.5 GiB). Under ~10 GiB even those do not fit and run with weights offloaded.
+    smallTierBelow: 12 * GIB,
   },
   {
     id: 'realesrgan-x4plus',
@@ -285,13 +290,14 @@ export const DEFAULT_GENERATOR = 'z-image-turbo'
 export const DEFAULT_EDITOR = 'flux2-klein-4b'
 export const DEFAULT_UPSCALER = 'realesrgan-x4plus'
 
-/** Below this memory budget the `small` files are used. */
+/** Below this memory budget the `small` files are used, unless a preset sets its own. */
 export const SMALL_TIER_BELOW = 7.5 * GIB
 
 export type Tier = 'default' | 'small'
 
 /** Unknown budget (CPU-only, an iGPU): the default files, which run from system RAM either way. */
-export const tierFor = (budgetBytes: number | null): Tier => (budgetBytes !== null && budgetBytes < SMALL_TIER_BELOW ? 'small' : 'default')
+export const tierFor = (budgetBytes: number | null, preset?: Preset): Tier =>
+  budgetBytes !== null && budgetBytes < (preset?.smallTierBelow ?? SMALL_TIER_BELOW) ? 'small' : 'default'
 
 export const findPreset = (id: string): Preset | undefined => PRESETS.find((p) => p.id === id)
 

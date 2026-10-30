@@ -456,6 +456,19 @@ describe('image model pulls', () => {
       await expect(resolveBundle(null, 'edit')).rejects.toMatchObject({ code: 'model_missing' })
     })
 
+    test('a bundle with a role this build does not know leaves the rest of the registry usable', async () => {
+      await pull(TURBO)
+      const r = await loadImageRegistry()
+      const turbo = r.bundles.find((b) => b.preset === DEFAULT_GENERATOR)!
+      r.bundles.push({ ...turbo, id: 'from-the-future', preset: null, components: [...turbo.components, { role: 'unet', sha256: turbo.components[0]!.sha256 }] })
+      await Bun.write(imageRegistryPath(), JSON.stringify(r))
+      expect((await resolveBundle(DEFAULT_GENERATOR, 'generator')).bundle.id).toBe(DEFAULT_GENERATOR)
+      await expect(resolveBundle('from-the-future', 'generator')).rejects.toMatchObject({
+        code: 'bad_request',
+        message: expect.stringContaining('needs a newer obrew'),
+      })
+    })
+
     test('slotId: the chosen id, else the built-in preset', () => {
       const empty: ImageRegistry = {
         version: 1,
@@ -673,13 +686,19 @@ describe('image model pulls', () => {
       expect((await loadImageRegistry()).defaultEdit).toBe('my-editor')
     })
 
-    test('refused before anything downloads: a non-LFS file, a path not listed, an unknown role, no components', async () => {
-      await expect(
-        pullCustom(custom('x', [{ role: 'vae', spec: 'org/custom:README.md' }]), { signal }),
-      ).rejects.toMatchObject({
-        code: 'bad_request',
-        message: expect.stringContaining('is not an LFS file'),
-      })
+    test('a non-LFS file (a tokenizer.json, often) is hashed from the Hub, then verified on download', async () => {
+      const bundle = await pullCustom(
+        custom('with-tokenizer', [
+          { role: 'diffusion', spec: 'org/custom:models/custom-Q4_0.gguf' },
+          { role: 'tokenizer', spec: 'org/custom:README.md' },
+        ]),
+        { signal },
+      )
+      expect(bundle.components).toContainEqual({ role: 'tokenizer', sha256: sha(new TextEncoder().encode('# custom\n')) })
+      expect((await resolveBundle('with-tokenizer', 'generator')).paths.tokenizer).toEndWith('README.md')
+    })
+
+    test('refused before anything downloads: a path not listed, an unknown role, no components', async () => {
       await expect(
         pullCustom(custom('x', [{ role: 'vae', spec: 'org/custom:models/missing.gguf' }]), {
           signal,

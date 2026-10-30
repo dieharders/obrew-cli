@@ -228,6 +228,17 @@ export interface CustomBundle {
   caps: Partial<Caps>
 }
 
+/** Git (non-LFS) files are small: the Hub stores anything large in LFS. */
+const SMALL_FILE_MAX = 50 * 1024 * 1024
+
+async function hashSmallFile(repo: string, revision: string, path: string, cb: PullCallbacks): Promise<string> {
+  const res = await fetch(resolveUrl(repo, path, revision), { signal: cb.signal, headers: { ...authHeaders(cb.token), 'user-agent': 'obrew-cli' } })
+  if (!res.ok) throw new ObrewError('bad_request', `${repo}/${path}: HTTP ${res.status}`)
+  const bytes = await res.arrayBuffer()
+  if (bytes.byteLength > SMALL_FILE_MAX) throw new ObrewError('bad_request', `${repo}/${path} is not an LFS file and too large to hash in memory`)
+  return new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
+}
+
 /** A bundle from named components: each one's hash and size come from the Hub's listing. */
 export async function pullCustom(custom: CustomBundle, cb: PullCallbacks & { makeDefault?: Slot[] }): Promise<Bundle> {
   if (custom.components.length === 0) throw new ObrewError('bad_request', 'name at least one component (--diffusion, --model, --llm, --vae, …)')
@@ -238,8 +249,10 @@ export async function pullCustom(custom: CustomBundle, cb: PullCallbacks & { mak
     const listing = await listRepoFiles(repo, cb.token, cb.signal, revision)
     const hit = listing.find((f) => f.path === path)
     if (!hit) throw new ObrewError('bad_request', `${path} is not in ${repo}@${revision}`)
-    if (!hit.sha256) throw new ObrewError('bad_request', `${repo}/${path} is not an LFS file, so the Hub gives no checksum to verify it against`)
-    files.push({ role, file: { repo, revision, path, sha256: hit.sha256, size: hit.size } })
+    // A small file kept in git rather than LFS (a tokenizer.json, often) has no SHA-256 in the
+    // listing: it is fetched once to hash it, and the download is verified against that.
+    const sha256 = hit.sha256 ?? (await hashSmallFile(repo, revision, path, cb))
+    files.push({ role, file: { repo, revision, path, sha256, size: hit.size } })
   }
   const isUpscaler = files.length === 1 && files[0]!.role === 'upscaler'
   return pullBundle(

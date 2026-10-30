@@ -90,7 +90,13 @@ function setStatus(ok, text) {
 }
 
 function chooseModel(useCase) {
-  $('#model').value = isInstalled(useCase.model) ? useCase.model : 'default'
+  const installed = useCase.model === 'default' || isInstalled(useCase.model)
+  $('#model').value = installed ? useCase.model : 'default'
+  // Say so when the use case's model is missing: the default model gives a different result.
+  const preset = state.models?.presets?.find((p) => p.id === useCase.model)
+  const missing = installed ? '' : `${preset?.title ?? useCase.model} is not installed, so this uses the default model. `
+  $('#use-case-hint').textContent = missing + useCase.hint
+  $('#use-case-hint').classList.toggle('warn', !installed)
 }
 
 function renderUseCases() {
@@ -107,9 +113,10 @@ function renderUseCases() {
 }
 
 function selectUseCase(uc) {
+  // A step count is per model (MOSS-Image 50, the turbo models 4–8): back to the model's default.
+  if (state.useCase !== uc) $('#steps').value = ''
   state.useCase = uc
   for (const b of $('#use-cases').children) b.setAttribute('aria-pressed', String(b.dataset.id === uc.id))
-  $('#use-case-hint').textContent = uc.hint
   $('#prompt').placeholder = uc.example
   $('#aspect').value = uc.aspect
   $('#title-row').classList.toggle('hidden', !uc.title)
@@ -444,6 +451,7 @@ function addCard(e, job) {
 function wire() {
   for (const a of ASPECTS) $('#aspect').append(new Option(a, a))
   $('#go').addEventListener('click', () => generate())
+  $('#model').addEventListener('change', () => ($('#steps').value = ''))
   $('#cancel').addEventListener('click', () => state.controller?.abort())
   $('#setup-go').addEventListener('click', () => run('/api/setup', {}, { title: 'Setting up image generation' }))
   $('#title').addEventListener('input', () => {

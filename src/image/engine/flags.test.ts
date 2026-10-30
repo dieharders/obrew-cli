@@ -294,6 +294,15 @@ describe('serverPlan', () => {
     expect(valueOf(p.args, '--listen-port')).toBe('8190')
   })
 
+  test('a model file flag this build lacks is fatal, not dropped', () => {
+    const noTokenizer = engine({ variant: 'metal', flags: ['--listen-ip', '--model-dir', '--diffusion-model', '--llm', '--vae', '--steps', '--cfg-scale'] })
+    const moss = resolved({
+      bundle: { ...TURBO, id: 'moss-image-sft', components: [...TURBO.components, { role: 'tokenizer', sha256: 'd'.repeat(64) }] },
+      paths: { ...resolved().paths, tokenizer: '/m/tokenizer.json' },
+    })
+    expect(() => plan({ engine: noTokenizer, resolved: moss })).toThrow(/--tokenizer.*moss-image-sft/)
+  })
+
   test('an empty flag list (an OBREW_SD_SERVER override) keeps everything', () => {
     const p = plan({ engine: engine({ variant: 'vulkan', flags: [] }), hardware: RX_7900 })
     expect(p.dropped).toEqual([])
