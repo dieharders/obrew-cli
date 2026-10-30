@@ -49,15 +49,19 @@ const TreeSchema = z.array(
 /** `HF_ENDPOINT` is the Hub's own override variable (mirrors, tests). */
 export const hfBase = () => (process.env.HF_ENDPOINT ?? 'https://huggingface.co').replace(/\/$/, '')
 
-export const resolveUrl = (repoId: string, path: string) =>
-  `${hfBase()}/${repoId}/resolve/main/${path.split('/').map(encodeURIComponent).join('/')}`
+/**
+ * `revision` pins a commit (or names a branch); `main` by default. The image presets pin one, so
+ * a repo that re-uploads a file under the same name cannot change what a preset installs.
+ */
+export const resolveUrl = (repoId: string, path: string, revision = 'main') =>
+  `${hfBase()}/${repoId}/resolve/${encodeURIComponent(revision)}/${path.split('/').map(encodeURIComponent).join('/')}`
 
 export function authHeaders(token?: string): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {}
 }
 
-export async function listRepoFiles(repoId: string, token?: string, signal?: AbortSignal): Promise<HfFile[]> {
-  const url = `${hfBase()}/api/models/${repoId}/tree/main?recursive=true`
+export async function listRepoFiles(repoId: string, token?: string, signal?: AbortSignal, revision = 'main'): Promise<HfFile[]> {
+  const url = `${hfBase()}/api/models/${repoId}/tree/${encodeURIComponent(revision)}?recursive=true`
   const res = await fetch(url, { signal, headers: { ...authHeaders(token), 'user-agent': 'obrew-cli' } })
   if (res.status === 401 || res.status === 403) {
     throw new ObrewError('bad_request', `${repoId} is gated or private; set HF_TOKEN to a token that can read it`)

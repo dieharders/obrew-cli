@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>obrew image demo</title>
+    <style>
+      :root {
+        --bg: #f5f6f8;
+        --panel: #ffffff;
+        --text: #15171c;
+        --muted: #5b6270;
+        --line: #e2e5ea;
+        --chip: #eef0f4;
+        --accent: #4f46e5;
+        --accent-ink: #ffffff;
+        --danger: #b42318;
+        --ok: #157f3d;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1014;
+          --panel: #171a20;
+          --text: #e7e9ee;
+          --muted: #98a1b0;
+          --line: #262a33;
+          --chip: #1f232b;
+          --accent: #8b93ff;
+          --accent-ink: #0e1014;
+          --danger: #ff8a7a;
+          --ok: #5fd38d;
+          color-scheme: dark;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 20px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 700;
+      }
+      header .spacer {
+        flex: 1;
+      }
+      header a {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        border-radius: 99px;
+        background: var(--chip);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill.ok::before,
+      .pill.bad::before {
+        content: '';
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--ok);
+      }
+      .pill.bad::before {
+        background: var(--danger);
+      }
+      main {
+        display: grid;
+        grid-template-columns: 380px minmax(0, 1fr);
+        gap: 20px;
+        max-width: 1500px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+          padding: 16px;
+        }
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      label,
+      .label {
+        display: block;
+        margin: 14px 0 6px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        text-transform: none;
+        letter-spacing: 0;
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text);
+      }
+      .check input {
+        width: auto;
+      }
+      textarea,
+      input,
+      select {
+        width: 100%;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--text);
+        font: inherit;
+      }
+      textarea {
+        min-height: 92px;
+        resize: vertical;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .seg {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      button {
+        font: inherit;
+        cursor: pointer;
+      }
+      .seg button,
+      .btn {
+        padding: 7px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+      }
+      .seg button[aria-pressed='true'],
+      .btn.primary {
+        background: var(--accent);
+        border-color: transparent;
+        color: var(--accent-ink);
+        font-weight: 600;
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .btn.small {
+        padding: 4px 9px;
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .hint {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .hint.warn {
+        color: var(--danger);
+      }
+      .drop {
+        display: grid;
+        place-items: center;
+        min-height: 72px;
+        padding: 10px;
+        border: 1.5px dashed var(--line);
+        border-radius: 10px;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+        cursor: pointer;
+      }
+      .drop.over {
+        border-color: var(--accent);
+      }
+      .drop img {
+        max-width: 100%;
+        max-height: 130px;
+        border-radius: 6px;
+      }
+      .progress {
+        height: 6px;
+        margin: 10px 0;
+        overflow: hidden;
+        border-radius: 99px;
+        background: var(--chip);
+      }
+      .progress > i {
+        display: block;
+        width: 0;
+        height: 100%;
+        background: var(--accent);
+        transition: width 0.25s;
+      }
+      .progress.busy > i {
+        width: 30%;
+        animation: slide 1.2s infinite ease-in-out;
+      }
+      @keyframes slide {
+        from {
+          transform: translateX(-110%);
+        }
+        to {
+          transform: translateX(360%);
+        }
+      }
+      .job {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        gap: 16px;
+        align-items: center;
+      }
+      @media (max-width: 600px) {
+        .job {
+          grid-template-columns: 1fr;
+        }
+      }
+      .job .shot {
+        display: grid;
+        place-items: center;
+        aspect-ratio: 16 / 9;
+        overflow: hidden;
+        border-radius: 8px;
+        background: var(--chip);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .job .shot img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+      .job h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+      .phase {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      details {
+        margin-top: 8px;
+      }
+      summary {
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .log {
+        max-height: 160px;
+        margin: 6px 0 0;
+        overflow: auto;
+        color: var(--muted);
+        font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
+      }
+      .error {
+        margin-top: 8px;
+        color: var(--danger);
+      }
+      .gallery {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+        gap: 16px;
+        margin-top: 16px;
+      }
+      .card {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+      }
+      .card .media {
+        background: var(--chip);
+      }
+      .card img,
+      .card canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .card .meta {
+        padding: 10px 12px 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .card .actions {
+        margin: 0;
+        padding: 0 12px 12px;
+        gap: 6px;
+      }
+      .empty {
+        padding: 40px 16px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>obrew · image demo</h1>
+      <span id="status" class="pill">checking…</span>
+      <span class="spacer"></span>
+      <a href="https://github.com/leejet/stable-diffusion.cpp" target="_blank" rel="noreferrer">local · stable-diffusion.cpp</a>
+    </header>
+    <main>
+      <section class="panel" id="controls">
+        <div id="setup" class="hidden">
+          <strong>Image generation is not set up</strong>
+          <p class="hint" id="setup-hint">
+            One click installs the engine and the default models from Hugging Face (several GB; downloads resume if interrupted).
+          </p>
+          <div class="actions"><button class="btn primary" id="setup-go">Set up image generation</button></div>
+        </div>
+
+        <span class="label">Use case</span>
+        <div class="seg" id="use-cases"></div>
+        <p class="hint" id="use-case-hint"></p>
+
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" spellcheck="true"></textarea>
+
+        <div id="title-row">
+          <label for="title">Thumbnail title</label>
+          <input id="title" placeholder="Drawn by the page, not the model" maxlength="80" />
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="aspect">Aspect</label>
+            <select id="aspect"></select>
+          </div>
+          <div>
+            <label for="model">Model</label>
+            <select id="model"></select>
+          </div>
+        </div>
+        <div class="row" style="grid-template-columns: 1fr 1fr 1fr">
+          <div>
+            <label for="seed">Seed</label>
+            <input id="seed" inputmode="numeric" placeholder="random" />
+          </div>
+          <div>
+            <label for="count">Count</label>
+            <select id="count">
+              <option>1</option>
+              <option>2</option>
+              <option>3</option>
+              <option>4</option>
+            </select>
+          </div>
+          <div>
+            <label for="steps">Steps</label>
+            <input id="steps" inputmode="numeric" placeholder="model default" />
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="fullhd" /> Exactly 1920×1080 (16:9)</label>
+
+        <span class="label">Start from an image</span>
+        <div class="drop" id="drop" tabindex="0">
+          <span id="drop-text">Drop an image here, or click to choose one</span>
+          <input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden />
+        </div>
+        <div id="input-mode" class="hidden">
+          <div class="seg" style="margin-top: 8px">
+            <button type="button" data-mode="ref" aria-pressed="true">Reference (edit)</button>
+            <button type="button" data-mode="init" aria-pressed="false">Image to image</button>
+            <button type="button" id="input-clear">Remove</button>
+          </div>
+          <div id="strength-row" class="hidden">
+            <label for="strength">Strength <span id="strength-value">0.6</span></label>
+            <input type="range" id="strength" min="0.1" max="1" step="0.05" value="0.6" />
+          </div>
+          <p class="hint" id="input-hint"></p>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="go">Generate</button>
+          <button class="btn" id="cancel" disabled>Cancel</button>
+        </div>
+      </section>
+
+      <section>
+        <div class="panel job" id="job">
+          <div class="shot"><img id="preview" alt="" class="hidden" /><span id="shot-empty">preview</span></div>
+          <div>
+            <h2 id="job-title">Nothing running</h2>
+            <div class="progress" id="bar"><i></i></div>
+            <div class="phase" id="phase">Pick a use case, write a prompt, press Generate.</div>
+            <div class="error hidden" id="error"></div>
+            <details>
+              <summary>CLI output</summary>
+              <pre class="log" id="log"></pre>
+            </details>
+          </div>
+        </div>
+        <div class="gallery" id="gallery"><div class="empty" id="empty">Images you make appear here.</div></div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

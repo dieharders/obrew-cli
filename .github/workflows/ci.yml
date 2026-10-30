@@ -6,7 +6,7 @@
 # handling, the engine lifecycle — where a local Windows run alone isn't proof.
 #
 # Day to day, the same checks run locally and for free: `bun run typecheck`, `bun run lint`,
-# `bun test ./src ./test`.
+# `bun test ./src ./test ./examples`.
 name: CI
 
 on:
@@ -36,7 +36,7 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       # The suite runs against a fake llama-server and a fake Hub; nothing is downloaded.
-      - run: bun test ./src ./test
+      - run: bun test ./src ./test ./examples
       - name: Build the host binary and run it
         run: |
           bun run build

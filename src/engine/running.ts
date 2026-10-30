@@ -32,19 +32,23 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-export async function recordRunning(record: RunningRecord): Promise<void> {
-  await mkdir(runningDir(), { recursive: true })
-  await Bun.write(join(runningDir(), `${record.pid}.json`), JSON.stringify(record))
+/**
+ * `dir` defaults to the text engine's records. The image engine (sd-server) keeps its own under
+ * `<data>/image/engine/running`, so `obrew engine status` never mistakes one for the other.
+ */
+export async function recordRunning(record: RunningRecord, dir: string = runningDir()): Promise<void> {
+  await mkdir(dir, { recursive: true })
+  await Bun.write(join(dir, `${record.pid}.json`), JSON.stringify(record))
 }
 
-export async function removeRunning(pid: number): Promise<void> {
-  await rm(join(runningDir(), `${pid}.json`), { force: true }).catch(() => {})
+export async function removeRunning(pid: number, dir: string = runningDir()): Promise<void> {
+  await rm(join(dir, `${pid}.json`), { force: true }).catch(() => {})
 }
 
-export async function listRunning(): Promise<RunningRecord[]> {
+export async function listRunning(dir: string = runningDir()): Promise<RunningRecord[]> {
   let names: string[]
   try {
-    names = await readdir(runningDir())
+    names = await readdir(dir)
   } catch {
     return []
   }
@@ -52,7 +56,7 @@ export async function listRunning(): Promise<RunningRecord[]> {
   for (const name of names) {
     if (!name.endsWith('.json')) continue
     try {
-      const parsed = RunningRecordSchema.safeParse(await Bun.file(join(runningDir(), name)).json())
+      const parsed = RunningRecordSchema.safeParse(await Bun.file(join(dir, name)).json())
       if (parsed.success) out.push(parsed.data)
     } catch {
       // Unreadable record; the reaper drops it below.
@@ -62,22 +66,22 @@ export async function listRunning(): Promise<RunningRecord[]> {
 }
 
 /** Kill engines whose owning obrew is gone; drop records of engines that are gone. */
-export async function reapOrphans(log?: (m: string) => void): Promise<number> {
+export async function reapOrphans(log?: (m: string) => void, dir: string = runningDir()): Promise<number> {
   let reaped = 0
-  for (const record of await listRunning()) {
+  for (const record of await listRunning(dir)) {
     if (!isAlive(record.pid)) {
-      await removeRunning(record.pid)
+      await removeRunning(record.pid, dir)
       continue
     }
     if (record.shared || isAlive(record.ownerPid)) continue
     try {
       process.kill(record.pid)
       reaped++
-      log?.(`reaped orphaned llama-server pid ${record.pid} (port ${record.port})`)
+      log?.(`reaped orphaned engine pid ${record.pid} (port ${record.port}, ${record.model})`)
     } catch {
       // Already gone between the check and the kill.
     }
-    await removeRunning(record.pid)
+    await removeRunning(record.pid, dir)
   }
   return reaped
 }

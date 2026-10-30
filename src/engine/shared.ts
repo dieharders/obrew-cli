@@ -73,7 +73,7 @@ const EXIT_POLL_MS = 100
  * Block until `pid` is gone: the grace period for a clean exit, then SIGKILL and a short
  * bounded wait for that to land. Returns whether it is gone.
  */
-async function waitGone(pid: number): Promise<boolean> {
+export async function waitGone(pid: number): Promise<boolean> {
   const soft = Date.now() + STOP_GRACE_MS
   while (isAlive(pid) && Date.now() < soft) await Bun.sleep(EXIT_POLL_MS)
   if (!isAlive(pid)) return true

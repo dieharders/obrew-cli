@@ -21,10 +21,14 @@ import type { ChatMessage } from '../../agent/messages'
 import { imagePart, transcriptContent, userContent } from '../../agent/images'
 import { DEFAULT_SYSTEM_PROMPT } from '../../agent/prompts'
 import { appendMessages, createSession, loadSession, newSessionId } from '../../agent/session'
+import { engineCommand } from '../../engine/command'
 import { engineConsoleFrom, launchArgs, loadOptionsFrom } from '../../engine/flags'
 import { requireEngine } from '../../engine/install'
 import { acquireEngine, reapIdleShared, type EngineHandle } from '../../engine/shared'
 import { reapOrphans } from '../../engine/running'
+import { detectHardware, GIB } from '../../image/engine/hardware'
+import { makeRoomForText, reapIdleImageShared, reapImageOrphans } from '../../image/engine/shared'
+import { takeLease, type LeaseHandle } from '../../shared/gpu'
 import { projectorPath, resolveModel } from '../../models/registry'
 import { DEFAULT_CTX_SIZE, loadConfig } from '../../shared/config'
 import { isAbortError, NOT_READY_HINT, ObrewError, UsageError, type FailCode } from '../../shared/errors'
@@ -99,13 +103,8 @@ const OPTIONS = {
 const ENGINE_MODES = ['shared', 'ephemeral'] as const
 const INPUT_FORMATS = ['text', 'json'] as const
 
-/**
- * A script named by `OBREW_LLAMA_SERVER` runs under this same Bun (tests use a fake server
- * written in TypeScript). Only meaningful when running from source: in a compiled binary
- * `process.execPath` is obrew itself.
- */
-export const engineCommand = (binary: string): string[] =>
-  /\.[cm]?[jt]s$/.test(binary) ? [process.execPath, binary] : [binary]
+// Re-exported from where it now lives, so the engine modules need not import this command.
+export { engineCommand }
 
 async function readPrompt(positionals: string[], promptFile: string | undefined): Promise<string> {
   if (promptFile) return (await readFile(promptFile, 'utf8')).trim()
@@ -220,6 +219,7 @@ export async function runExec(argv: string[]): Promise<number> {
   const wallTimer = setTimeout(() => stop('timeout'), wallMs)
 
   let handle: EngineHandle | null = null
+  let gpuLease: LeaseHandle | null = null
   const mcpClients: McpClient[] = []
   const emit = (event: ExecEvent) => {
     if (event.type === 'tool.start') {
@@ -236,7 +236,9 @@ export async function runExec(argv: string[]): Promise<number> {
 
   try {
     await reapOrphans(out.log)
+    await reapImageOrphans(out.log)
     if ((await reapIdleShared()) ) out.log('engine: stopped the idle shared llama-server')
+    if (await reapIdleImageShared()) out.log('engine: stopped the idle image engine')
     const config = await loadConfig()
     const model = await resolveModel(values.model)
     const engine = await requireEngine(config)
@@ -279,6 +281,21 @@ export async function runExec(argv: string[]): Promise<number> {
       ...(mmprojPath ? { mmprojPath } : {}),
     })
     armStall()
+    // An idle image engine that would leave the text engine no room on the GPU is stopped
+    // first (a busy one is waited for); then this run's lease says the text engine is in use.
+    const footprintBytes = model.sizeBytes + (mmprojPath ? Bun.file(mmprojPath).size : 0) + 1.5 * GIB
+    await makeRoomForText({
+      footprintBytes,
+      onGpu: engine.variant !== 'cpu',
+      hardware: () => detectHardware(),
+      signal: controller.signal,
+      log: out.log,
+      onWait: (detail) => {
+        armStall()
+        emit({ type: 'engine.status', state: 'starting', detail })
+      },
+    })
+    gpuLease = await takeLease('text', footprintBytes)
     handle = await acquireEngine({
       mode: engineMode,
       command: engineCommand(engine.binary),
@@ -372,6 +389,7 @@ export async function runExec(argv: string[]): Promise<number> {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (handle) await handle.release()
+    await gpuLease?.release()
     for (const client of mcpClients) await client.close().catch(() => {})
     untrack(controller)
   }

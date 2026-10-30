@@ -10,17 +10,20 @@
     "obrew": "./src/main.ts"
   },
   "llamacpp_tag": "b10937",
+  "sdcpp_tag": "master-994-e779d4f",
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "bun test ./src ./test",
+    "test": "bun test ./src ./test ./examples",
     "test:e2e": "OBREW_E2E=1 bun test ./test/e2e",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "bun run build.ts",
     "build:all": "bun run build.ts --all",
-    "smoke": "bun run scripts/smoke.ts"
+    "smoke": "bun run scripts/smoke.ts",
+    "smoke:image": "bun run scripts/smoke-image.ts",
+    "demo:image": "bun run examples/image-demo/server.ts"
   },
   "dependencies": {
     "zod": "^4.0.0"

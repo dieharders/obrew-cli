@@ -55,7 +55,7 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck && bun run lint && bun test ./src ./test
+      - run: bun run typecheck && bun run lint && bun test ./src ./test ./examples
       # `bun build --compile --target` cross-compiles: one Linux runner produces all five.
       - run: bun run build:all
       - name: Smoke the Linux build

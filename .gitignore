@@ -10,3 +10,6 @@ obrew.exe.map
 
 # Local data when OBREW_HOME points inside the repo during development
 .obrew-home/
+
+# Images the demo app writes (examples/image-demo)
+examples/image-demo/.out/
